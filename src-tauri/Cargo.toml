@@ -1,0 +1,102 @@
+[package]
+name = "kru"
+version = "0.9.0"
+description = "Local credential relay unit for AI agents"
+authors = ["KRU contributors"]
+license = "MIT"
+edition = "2024"
+rust-version = "1.88"
+
+[lib]
+name = "mcp_vault"
+path = "src/lib.rs"
+
+[features]
+default = ["gui"]
+gui = [
+    "desktop-fill",
+    "dep:tauri",
+    "dep:tauri-plugin-clipboard-manager",
+    "dep:tauri-plugin-dialog",
+    "dep:tauri-plugin-opener",
+]
+desktop-fill = ["dep:enigo", "dep:windows"]
+
+[[bin]]
+name = "kru"
+path = "src/main.rs"
+
+[[example]]
+name = "desktop_agent_sink"
+required-features = ["desktop-fill"]
+
+[[example]]
+name = "desktop_keyboard_agent_sink"
+required-features = ["desktop-fill"]
+
+[[example]]
+name = "desktop_keyboard_selftest"
+required-features = ["desktop-fill"]
+
+[[example]]
+name = "desktop_selftest"
+required-features = ["desktop-fill"]
+
+[build-dependencies]
+tauri-build = { version = "2.5.3", features = [] }
+
+[dependencies]
+anyhow = "1.0"
+atomic-write-file = "0.3"
+argon2 = "0.5"
+async-trait = "0.1"
+axum = { version = "0.8", features = ["ws"] }
+base64 = "0.22"
+chacha20poly1305 = "0.10"
+chrono = { version = "0.4", features = ["serde"] }
+dirs = "6"
+fs2 = "0.4"
+futures-util = "0.3"
+getrandom = "0.3"
+hmac = "0.12"
+keyring = "4.1"
+portable-pty = "0.9"
+regex = "1.11"
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+rmcp = { version = "3.1", features = ["server", "macros", "transport-io"] }
+rpassword = "7.4"
+russh = { version = "0.62", default-features = false, features = ["ring", "rsa"] }
+schemars = "1"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+sha2 = "0.10"
+sha1 = "0.10"
+subtle = "2.6"
+toml_edit = "0.25.13"
+tauri = { version = "2.11.5", features = ["tray-icon"], optional = true }
+tauri-plugin-clipboard-manager = { version = "2", optional = true }
+tauri-plugin-dialog = { version = "2", optional = true }
+tauri-plugin-opener = { version = "2", optional = true }
+thiserror = "2"
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "time", "net", "io-util", "sync", "process"] }
+tokio-util = "0.7"
+tower-http = { version = "0.6", features = ["cors"] }
+url = "2.5"
+uuid = { version = "1", features = ["v4", "serde"] }
+zeroize = { version = "1.8", features = ["derive"] }
+jsonc-parser = { version = "0.33.1", features = ["cst", "serde"] }
+enigo = { version = "0.6.1", optional = true }
+
+[target.'cfg(windows)'.dependencies]
+windows = { version = "0.62", optional = true, features = ["Win32_Foundation", "Win32_Graphics_Dwm", "Win32_Graphics_Gdi", "Win32_System_Threading", "Win32_UI_Input_KeyboardAndMouse", "Win32_UI_WindowsAndMessaging"] }
+
+[dev-dependencies]
+tempfile = "3"
+tokio-tungstenite = "0.29"
+
+[profile.release]
+codegen-units = 1
+lto = true
+opt-level = "s"
+panic = "abort"
+strip = true

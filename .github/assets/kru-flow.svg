@@ -1,0 +1,63 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1400" height="360" viewBox="0 0 1400 360" role="img" aria-labelledby="title desc">
+  <title id="title">How KRU relays credentials</title>
+  <desc id="desc">The agent chooses an action, KRU decrypts the selected value locally, and the target receives the credential.</desc>
+  <defs>
+    <style>
+      .sans{font-family:"Arial Narrow","Segoe UI",Arial,sans-serif}.mono{font-family:"Cascadia Mono",Consolas,monospace}.ink{fill:#262626}.muted{fill:#666361}.paper{fill:#fbfaf9}.orange{fill:#ed4a1a}.line{stroke:#8d8a88;stroke-width:1}.soft{stroke:#bbb6b2;stroke-width:1}.tiny{font-size:12px;letter-spacing:1.5px}.label{font-size:22px;font-weight:700}.body{font-size:16px}
+    </style>
+  </defs>
+  <rect width="1400" height="360" fill="#f6f4f2"/>
+  <rect width="1400" height="2" fill="#262626"/>
+  <rect y="358" width="1400" height="2" fill="#262626"/>
+
+  <g transform="translate(58 50)">
+    <rect width="310" height="260" class="paper" stroke="#bbb6b2"/>
+    <rect width="8" height="260" fill="#5e605f"/>
+    <rect x="28" y="27" width="28" height="28" fill="#5e605f"/>
+    <text x="42" y="47" text-anchor="middle" class="mono paper" font-size="13">A</text>
+    <text x="76" y="46" class="mono muted tiny">AGENT</text>
+    <text x="28" y="104" class="sans ink label">Chooses the action</text>
+    <text x="28" y="138" class="sans muted body">Item · field · command</text>
+    <text x="28" y="164" class="sans muted body">request · target · timing</text>
+    <line x1="28" y1="204" x2="280" y2="204" class="soft"/>
+    <text x="28" y="231" class="mono muted" font-size="11">NO HIDDEN VALUE REQUIRED</text>
+  </g>
+
+  <g transform="translate(446 50)">
+    <rect width="508" height="260" fill="#0b0a0a" stroke="#262626"/>
+    <rect width="508" height="7" class="orange"/>
+    <rect x="28" y="27" width="28" height="28" class="orange"/>
+    <text x="42" y="47" text-anchor="middle" class="mono paper" font-size="13">B</text>
+    <text x="76" y="46" class="mono" fill="#f4fcfc" font-size="12" letter-spacing="1.5">KRU / LOCAL RELAY</text>
+    <text x="28" y="103" class="sans" fill="#f4fcfc" font-size="25" font-weight="700">Decrypts only when needed</text>
+    <g transform="translate(28 130)" class="mono" font-size="11">
+      <rect width="130" height="34" fill="#1e1e1e" stroke="#383838"/><text x="65" y="22" text-anchor="middle" fill="#f4fcfc">FIELD NAME</text>
+      <rect x="144" width="130" height="34" fill="#ed4a1a"/><text x="209" y="22" text-anchor="middle" class="paper">LOCAL KEY</text>
+      <rect x="288" width="130" height="34" fill="#1e1e1e" stroke="#383838"/><text x="353" y="22" text-anchor="middle" fill="#f4fcfc">ONE ACTION</text>
+    </g>
+    <line x1="28" y1="204" x2="480" y2="204" stroke="#383838"/>
+    <rect x="28" y="221" width="8" height="8" class="orange"/>
+    <text x="48" y="230" class="mono" fill="#f4fcfc" font-size="11">PLAINTEXT IS NOT RETURNED BY DEFAULT</text>
+  </g>
+
+  <g transform="translate(1032 50)">
+    <rect width="310" height="260" class="paper" stroke="#bbb6b2"/>
+    <rect x="302" width="8" height="260" class="orange"/>
+    <rect x="28" y="27" width="28" height="28" class="orange"/>
+    <text x="42" y="47" text-anchor="middle" class="mono paper" font-size="13">C</text>
+    <text x="76" y="46" class="mono muted tiny">TARGET</text>
+    <text x="28" y="104" class="sans ink label">Receives the credential</text>
+    <g transform="translate(28 132)" class="mono" font-size="11">
+      <rect width="112" height="34" fill="#5e605f"/><text x="56" y="22" text-anchor="middle" class="paper">BROWSER</text>
+      <rect x="124" width="130" height="34" class="paper" stroke="#bbb6b2"/><text x="189" y="22" text-anchor="middle" class="ink">TERMINAL</text>
+      <rect y="48" width="112" height="34" class="paper" stroke="#bbb6b2"/><text x="56" y="70" text-anchor="middle" class="ink">SSH</text>
+      <rect x="124" y="48" width="130" height="34" class="paper" stroke="#bbb6b2"/><text x="189" y="70" text-anchor="middle" class="ink">HTTP API</text>
+    </g>
+    <line x1="28" y1="228" x2="282" y2="228" class="soft"/>
+  </g>
+
+  <path d="M368 180h62m-12-10 12 10-12 10" fill="none" class="line"/>
+  <path d="M954 180h62m-12-10 12 10-12 10" fill="none" class="line"/>
+  <rect x="390" y="173" width="8" height="8" class="orange"/>
+  <rect x="978" y="173" width="8" height="8" class="orange"/>
+</svg>

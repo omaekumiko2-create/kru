@@ -1,0 +1,112 @@
+name: Portable release
+
+on:
+  workflow_dispatch:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+jobs:
+  windows:
+    runs-on: windows-2022
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: "1.88"
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+      - run: npm ci
+      - run: npm run build
+      - run: npm run portable
+      - uses: actions/upload-artifact@v4
+        with:
+          name: windows-portable
+          path: |
+            dist/*.zip
+            dist/*.sha256
+
+  macos:
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: "1.88"
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+      - run: npm ci
+      - run: npm run release:mac
+      - uses: actions/upload-artifact@v4
+        with:
+          name: macos-arm64-portable
+          path: |
+            dist/*.zip
+            dist/*.sha256
+
+  linux-gui:
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Tauri system packages
+        run: >-
+          sudo apt-get update && sudo apt-get install -y
+          libwebkit2gtk-4.1-dev build-essential curl wget file
+          libssl-dev libayatana-appindicator3-dev librsvg2-dev
+          patchelf libxdo-dev
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: "1.88"
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+      - run: npm ci
+      - run: npm run release:linux
+      - uses: actions/upload-artifact@v4
+        with:
+          name: linux-gui-portable
+          path: |
+            dist/*.tar.gz
+            dist/*.sha256
+
+  linux-headless:
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: "1.88"
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+      - run: npm ci
+      - run: npm run release:headless
+      - uses: actions/upload-artifact@v4
+        with:
+          name: linux-headless
+          path: |
+            dist/*.tar.gz
+            dist/*.sha256
+
+  publish:
+    if: startsWith(github.ref, 'refs/tags/')
+    needs: [windows, macos, linux-gui, linux-headless]
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: release-assets
+          merge-multiple: true
+      - name: Create GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release create "$GITHUB_REF_NAME" release-assets/* --generate-notes --title "KRU $GITHUB_REF_NAME"

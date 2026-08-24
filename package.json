@@ -1,0 +1,25 @@
+{
+  "name": "kru",
+  "version": "0.9.0",
+  "private": true,
+  "description": "KRU — a local credential relay unit for AI agents.",
+  "scripts": {
+    "dev": "tauri dev",
+    "build": "tauri build",
+    "build:mac": "tauri build --bundles app",
+    "build:linux": "tauri build --bundles appimage",
+    "build:headless": "cargo build --release --manifest-path src-tauri/Cargo.toml --no-default-features",
+    "portable": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/package-portable.ps1",
+    "portable:mac": "bash scripts/package-portable-macos.sh",
+    "portable:linux": "bash scripts/package-portable-linux.sh",
+    "portable:headless": "bash scripts/package-headless-linux.sh",
+    "release:mac": "npm run build:mac && npm run portable:mac",
+    "release:linux": "npm run build:linux && npm run portable:linux",
+    "release:headless": "npm run build:headless && npm run portable:headless",
+    "check": "cargo check --manifest-path src-tauri/Cargo.toml",
+    "test": "cargo test --manifest-path src-tauri/Cargo.toml"
+  },
+  "devDependencies": {
+    "@tauri-apps/cli": "2.11.4"
+  }
+}

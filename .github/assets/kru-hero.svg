@@ -1,0 +1,121 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1400" height="820" viewBox="0 0 1400 820" role="img" aria-labelledby="title desc">
+  <title id="title">KRU — Key Relay Unit</title>
+  <desc id="desc">A local credential relay for AI agents, shown beside the KRU desktop interface.</desc>
+  <defs>
+    <filter id="shadow" x="-20%" y="-20%" width="140%" height="150%">
+      <feDropShadow dx="0" dy="14" stdDeviation="16" flood-color="#262626" flood-opacity="0.18"/>
+    </filter>
+    <style>
+      .sans{font-family:"Arial Narrow","Segoe UI",Arial,sans-serif}.mono{font-family:"Cascadia Mono",Consolas,monospace}.ink{fill:#262626}.muted{fill:#666361}.paper{fill:#fbfaf9}.chassis{fill:#ebe9e7}.orange{fill:#ed4a1a}.displayText{fill:#f4fcfc}.line{stroke:#8d8a88;stroke-width:1}.softLine{stroke:#bbb6b2;stroke-width:1}.small{font-size:13px;letter-spacing:2px}.tiny{font-size:10px;letter-spacing:1.4px}.body{font-size:18px}.title{font-size:112px;font-weight:300;letter-spacing:8px}.seven{font-family:"Cascadia Mono",Consolas,monospace;font-size:82px;font-weight:300;letter-spacing:-8px}
+    </style>
+  </defs>
+
+  <rect width="1400" height="820" fill="#ebe9e7"/>
+  <rect width="1400" height="8" fill="#262626"/>
+  <rect y="8" width="216" height="5" fill="#ed4a1a"/>
+
+  <g transform="translate(74 78)">
+    <rect y="7" width="9" height="9" class="orange"/>
+    <text x="26" y="17" class="mono ink small" font-weight="700">K.R.U.</text>
+    <line x1="114" y1="12" x2="192" y2="12" class="line"/>
+    <text x="210" y="17" class="mono muted tiny">KEY RELAY UNIT</text>
+
+    <text y="178" class="sans ink title">KRU</text>
+    <text x="6" y="224" class="sans ink" font-size="32" font-weight="600">CREDENTIALS STAY LOCAL.</text>
+    <text x="6" y="264" class="sans ink" font-size="32" font-weight="600">AGENTS KEEP WORKING.</text>
+
+    <line x1="6" y1="310" x2="444" y2="310" class="line"/>
+    <path d="M6 310v22m438-22v22" fill="none" class="line"/>
+    <text x="6" y="368" class="sans muted body">A small, open-source relay for the final</text>
+    <text x="6" y="398" class="sans muted body">authentication step—without putting hidden</text>
+    <text x="6" y="428" class="sans muted body">credentials into the agent conversation.</text>
+
+    <g transform="translate(6 498)">
+      <rect width="142" height="46" class="orange"/>
+      <text x="71" y="29" text-anchor="middle" class="mono paper" font-size="12" font-weight="700">LOCAL FIRST</text>
+      <rect x="154" width="142" height="46" fill="#fbfaf9" stroke="#bbb6b2"/>
+      <text x="225" y="29" text-anchor="middle" class="mono ink" font-size="12" font-weight="700">OPEN SOURCE</text>
+      <rect x="308" width="136" height="46" fill="#5e605f"/>
+      <text x="376" y="29" text-anchor="middle" class="mono paper" font-size="12" font-weight="700">NO ACCOUNT</text>
+    </g>
+
+    <g transform="translate(6 596)">
+      <text y="0" class="mono orange tiny">01</text><text x="34" class="mono ink tiny">SAVE ONCE</text>
+      <text x="148" class="mono orange tiny">02</text><text x="182" class="mono ink tiny">CONNECT</text>
+      <text x="286" class="mono orange tiny">03</text><text x="320" class="mono ink tiny">HAND OFF</text>
+      <line y1="19" x2="444" y2="19" class="softLine"/>
+      <rect y="31" width="444" height="3" class="orange"/>
+    </g>
+  </g>
+
+  <g transform="translate(790 60)" filter="url(#shadow)">
+    <rect width="518" height="700" fill="#fdfdfc" stroke="#262626" stroke-width="2"/>
+    <rect width="518" height="46" class="chassis"/>
+    <rect x="16" y="18" width="7" height="7" class="orange"/>
+    <text x="35" y="26" class="mono ink" font-size="11" font-weight="700" letter-spacing="2">K.R.U.</text>
+    <line x1="103" y1="22" x2="148" y2="22" class="line"/>
+    <text x="160" y="26" class="mono muted" font-size="7" letter-spacing="1.5">KEY RELAY UNIT</text>
+    <text x="379" y="26" class="mono muted" font-size="9">EN</text>
+    <text x="409" y="26" class="mono ink" font-size="9" font-weight="700">ZH</text>
+    <line x1="451" y1="22" x2="465" y2="22" stroke="#262626"/>
+    <path d="M491 16l12 12m0-12-12 12" fill="none" stroke="#262626"/>
+
+    <rect y="46" width="518" height="58" class="chassis"/>
+    <line y1="103" x2="518" y2="103" stroke="#262626"/>
+    <g class="mono" font-size="9">
+      <rect x="41" y="62" width="21" height="21" class="orange"/><text x="51.5" y="76" text-anchor="middle" class="paper" font-weight="700">A</text><rect x="70" y="69" width="6" height="6" class="orange"/><text x="88" y="72" class="muted" font-size="7">ITEMS</text><text x="88" y="84" class="ink" font-size="11" font-weight="700">VAULT</text>
+      <rect x="224" y="62" width="21" height="21" fill="#fbfaf9" stroke="#8d8a88"/><text x="234.5" y="76" text-anchor="middle" class="muted">B</text><rect x="253" y="69" width="6" height="6" fill="#8d8a88"/><text x="271" y="72" class="muted" font-size="7">LOG</text><text x="271" y="84" class="ink" font-size="11" font-weight="700">AUDIT</text>
+      <rect x="403" y="62" width="21" height="21" fill="#fbfaf9" stroke="#8d8a88"/><text x="413.5" y="76" text-anchor="middle" class="muted">C</text><rect x="432" y="69" width="6" height="6" fill="#8d8a88"/><text x="450" y="72" class="muted" font-size="7">SYSTEM</text><text x="450" y="84" class="ink" font-size="11" font-weight="700">SET</text>
+    </g>
+
+    <rect y="104" width="518" height="180" fill="#0b0a0a"/>
+    <rect x="8" y="112" width="502" height="164" fill="none" stroke="#1e1e1e"/>
+    <g class="mono">
+      <rect x="18" y="126" width="28" height="28" fill="#fbfaf9"/><text x="32" y="145" text-anchor="middle" fill="#262626" font-size="14">A</text><text x="58" y="143" fill="#f4fcfc" font-size="11">FILL</text><rect x="109" y="135" width="7" height="7" fill="#ea1f11"/>
+      <rect x="18" y="160" width="28" height="28" fill="#fbfaf9"/><text x="32" y="179" text-anchor="middle" fill="#262626" font-size="14">B</text><text x="58" y="177" fill="#f4fcfc" font-size="11">SSH</text><rect x="109" y="169" width="7" height="7" fill="#ea1f11"/>
+      <rect x="18" y="194" width="28" height="28" fill="#fbfaf9"/><text x="32" y="213" text-anchor="middle" fill="#262626" font-size="14">C</text><text x="58" y="211" fill="#f4fcfc" font-size="11">HTTP</text><rect x="109" y="203" width="7" height="7" fill="#4a71a4"/>
+      <text x="145" y="132" fill="#383838" font-size="9" letter-spacing="2">PAGE A</text>
+      <rect x="196" y="116" width="55" height="22" fill="none" stroke="#ed4a1a"/><text x="223.5" y="131" text-anchor="middle" fill="#f4fcfc" font-size="10">VAULT</text>
+      <text x="145" y="213" class="displayText seven">0005</text><text x="357" y="213" fill="#f4fcfc" font-size="11">ITEM</text>
+      <text x="159" y="244" fill="#f4fcfc" font-size="11">▶ READY</text><rect x="224" y="228" width="60" height="23" class="orange"/><text x="254" y="244" text-anchor="middle" class="paper" font-size="9">ALL ON</text>
+      <text x="452" y="131" fill="#383838" font-size="8">LAST USE</text><text x="446" y="174" class="displayText" font-size="34">OK</text><text x="461" y="191" fill="#f4fcfc" font-size="8">CHECK</text>
+    </g>
+    <g transform="translate(416 226)">
+      <rect y="20" width="7" height="10" class="orange"/><rect x="12" y="8" width="7" height="22" class="orange"/><rect x="24" width="7" height="30" class="orange"/><rect x="36" y="14" width="7" height="16" class="orange"/><rect x="48" y="5" width="7" height="25" fill="#4a71a4"/><rect x="60" y="18" width="7" height="12" fill="#5e605f"/><rect x="72" y="10" width="7" height="20" fill="#5e605f"/>
+    </g>
+
+    <g transform="translate(18 303)">
+      <rect width="150" height="42" class="paper" stroke="#bbb6b2"/><rect width="4" height="42" class="orange"/><text x="18" y="26" class="mono muted" font-size="10">■  SEARCH</text>
+      <rect x="372" width="110" height="42" class="orange"/><text x="427" y="26" text-anchor="middle" class="mono paper" font-size="10" font-weight="700">＋ ADD</text>
+
+      <g transform="translate(0 66)">
+        <text class="mono muted" font-size="9">ITEM / 01</text><rect y="17" width="8" height="8" class="orange"/><text x="17" y="25" class="mono muted" font-size="8">READY</text>
+        <path d="M80 4h-9v90h9" fill="none" class="line"/>
+        <text x="94" y="20" class="sans ink" font-size="19" font-weight="700">Production API</text><text x="94" y="46" class="mono muted" font-size="10">https://api.example.dev/v1</text><text x="94" y="66" class="mono muted" font-size="9">1 HIDDEN CREDENTIAL</text>
+        <rect x="323" y="45" width="73" height="34" fill="#5e605f"/><text x="359.5" y="66" text-anchor="middle" class="mono paper" font-size="9" font-weight="700">CHECK</text><rect x="404" y="45" width="78" height="34" class="paper" stroke="#bbb6b2"/><text x="443" y="66" text-anchor="middle" class="mono ink" font-size="9">EDIT</text>
+      </g>
+
+      <line y1="179" x2="482" y2="179" class="softLine"/>
+      <g transform="translate(0 204)">
+        <text class="mono muted" font-size="9">ITEM / 02</text><rect y="17" width="8" height="8" class="orange"/><text x="17" y="25" class="mono muted" font-size="8">READY</text>
+        <path d="M80 4h-9v90h9" fill="none" class="line"/>
+        <text x="94" y="20" class="sans ink" font-size="19" font-weight="700">GPU Lab</text><text x="94" y="46" class="mono muted" font-size="10">10.0.0.24:22</text><text x="94" y="66" class="mono muted" font-size="9">PASSWORD · SSH POLICY</text>
+        <rect x="323" y="45" width="73" height="34" fill="#5e605f"/><text x="359.5" y="66" text-anchor="middle" class="mono paper" font-size="9" font-weight="700">CHECK</text><rect x="404" y="45" width="78" height="34" class="paper" stroke="#bbb6b2"/><text x="443" y="66" text-anchor="middle" class="mono ink" font-size="9">EDIT</text>
+      </g>
+
+      <line y1="317" x2="482" y2="317" class="softLine"/>
+      <g transform="translate(0 342)">
+        <text class="mono muted" font-size="9">ITEM / 03</text><rect y="17" width="8" height="8" class="orange"/><text x="17" y="25" class="mono muted" font-size="8">READY</text>
+        <path d="M80 4h-9v74h9" fill="none" class="line"/>
+        <text x="94" y="20" class="sans ink" font-size="19" font-weight="700">Customer Portal</text><text x="94" y="46" class="mono muted" font-size="9">USERNAME · PASSWORD · TOTP</text>
+        <rect x="404" y="30" width="78" height="34" class="paper" stroke="#bbb6b2"/><text x="443" y="51" text-anchor="middle" class="mono ink" font-size="9">EDIT</text>
+      </g>
+    </g>
+  </g>
+
+  <g transform="translate(790 782)">
+    <rect width="8" height="8" class="orange"/>
+    <text x="18" y="8" class="mono muted" font-size="9" letter-spacing="1.5">WINDOWS · MACOS · LINUX · HEADLESS</text>
+    <line x1="374" y1="4" x2="518" y2="4" class="line"/>
+  </g>
+</svg>

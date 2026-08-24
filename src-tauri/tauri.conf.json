@@ -1,0 +1,61 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "productName": "KRU",
+  "version": "0.9.0",
+  "identifier": "dev.kru.desktop",
+  "build": {
+    "frontendDist": "../renderer",
+    "removeUnusedCommands": true
+  },
+  "app": {
+    "withGlobalTauri": true,
+    "windows": [
+      {
+        "label": "main",
+        "title": "KRU",
+        "width": 460,
+        "height": 690,
+        "minWidth": 460,
+        "minHeight": 690,
+        "maxWidth": 460,
+        "maxHeight": 690,
+        "center": true,
+        "decorations": false,
+        "transparent": false,
+        "shadow": true,
+        "resizable": false,
+        "maximizable": false,
+        "fullscreen": false,
+        "backgroundColor": "#EBE9E7"
+      }
+    ],
+    "security": {
+      "csp": "default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data: asset: http://asset.localhost; connect-src ipc: http://ipc.localhost"
+    }
+  },
+  "bundle": {
+    "active": false,
+    "resources": {
+      "../browser-extension/": "browser-extension/"
+    },
+    "icon": [
+      "icons/32x32.png",
+      "icons/128x128.png",
+      "icons/128x128@2x.png",
+      "icons/icon.icns",
+      "icons/icon.ico"
+    ],
+    "windows": {
+      "webviewInstallMode": {
+        "type": "downloadBootstrapper",
+        "silent": true
+      },
+      "nsis": {
+        "installMode": "currentUser"
+      }
+    },
+    "macOS": {
+      "minimumSystemVersion": "11.0"
+    }
+  }
+}

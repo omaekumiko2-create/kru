@@ -1,0 +1,142 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data:; connect-src ipc: http://ipc.localhost" />
+    <meta name="viewport" content="width=device-width,initial-scale=1" />
+    <title>KRU</title>
+    <link rel="stylesheet" href="styles.css" />
+  </head>
+  <body>
+    <div class="title-drag-region" data-tauri-drag-region>
+      <div class="app-mark" data-tauri-drag-region>
+        <span class="app-mark-led" aria-hidden="true"></span>
+        <strong>K.R.U.</strong>
+        <i aria-hidden="true"></i>
+        <small>KEY RELAY UNIT</small>
+      </div>
+      <div class="language-switch" id="language-switch" role="group" aria-label="Language">
+        <button type="button" data-language="en">EN</button>
+        <button class="active" type="button" data-language="zh">ZH</button>
+      </div>
+      <button class="owner-lock-button hidden" id="owner-lock-button" type="button">LOCK</button>
+      <div class="window-controls">
+        <button class="window-control" data-window-action="minimize" aria-label="最小化"><svg viewBox="0 0 12 12"><path d="M2 8.5h8" /></svg></button>
+        <button class="window-control close" data-window-action="close" aria-label="关闭"><svg viewBox="0 0 12 12"><path d="m2.5 2.5 7 7m0-7-7 7" /></svg></button>
+      </div>
+    </div>
+
+    <div class="app-shell">
+      <aside class="sidebar">
+        <nav class="nav" data-active="connections">
+          <button class="nav-item active" data-page="connections"><b>A</b><i aria-hidden="true"></i><span>项目<small>ITEMS</small></span></button>
+          <button class="nav-item" data-page="activity"><b>B</b><i aria-hidden="true"></i><span>记录<small>LOG</small></span></button>
+          <button class="nav-item" data-page="settings"><b>C</b><i aria-hidden="true"></i><span>设置<small>SYSTEM</small></span></button>
+        </nav>
+      </aside>
+
+      <main class="main-content">
+        <div class="metric-grid" id="metrics"></div>
+
+        <section class="page active" id="page-connections">
+          <header class="page-header connections-header"><label class="page-search"><i aria-hidden="true"></i><input class="page-search-input" data-page-search="connections" type="search" placeholder="SEARCH" aria-label="搜索秘密项目" autocomplete="off" /></label><div class="panel-controls"><div class="draft-control"><button class="button quiet panel-add-button" id="drafts-button" type="button" disabled>草稿</button><button class="draft-delete-button hidden" id="delete-draft-button" type="button" aria-label="删除草稿" title="删除草稿">×</button></div><button class="button primary panel-add-button" id="add-connection-button">＋ 添加</button></div></header>
+          <div class="connections-grid" id="connections-list"></div>
+          <i class="fixed-scroll-thumb" data-scroll-for="#connections-list" aria-hidden="true"></i>
+        </section>
+
+        <section class="page" id="page-activity">
+          <header class="page-header"><label class="page-search"><i aria-hidden="true"></i><input class="page-search-input" data-page-search="activity" type="search" placeholder="SEARCH" aria-label="搜索操作记录" autocomplete="off" /></label><div class="page-header-actions"><div class="filter-control"><button class="filter-trigger" id="activity-filter-menu-button" type="button" aria-expanded="false" aria-controls="activity-filter-menu" aria-label="记录筛选"><b id="activity-filter-current-key">A</b><span id="activity-filter-current-label">ALL</span><i aria-hidden="true"></i></button><div class="filter-menu activity-filter-menu hidden" id="activity-filter-menu" role="menu" aria-label="记录筛选"><button class="filter-pill active" type="button" role="menuitem" data-activity-filter="all"><b>A</b><span>ALL</span></button><button class="filter-pill" type="button" role="menuitem" data-activity-filter="error"><b>B</b><span>ERROR</span></button><button class="filter-pill" type="button" role="menuitem" data-activity-filter="success"><b>C</b><span>PASS</span></button></div></div><button class="button quiet" id="clear-activity-button">CLEAR LOG</button></div></header>
+          <section class="content-panel activity-panel"><div class="activity-list" id="activity-list"></div></section>
+          <i class="fixed-scroll-thumb" data-scroll-for="#page-activity .activity-panel" aria-hidden="true"></i>
+        </section>
+
+        <section class="page" id="page-settings">
+          <header class="page-header"><label class="page-search"><i aria-hidden="true"></i><input class="page-search-input" data-page-search="settings" type="search" placeholder="SEARCH" aria-label="搜索系统设置" autocomplete="off" /></label><div class="page-header-actions"><button class="button primary" id="header-export-backup-button" type="button">一键打包</button><button class="button quiet" id="header-import-backup-button" type="button">一键导入包</button></div></header>
+          <div class="settings-layout">
+            <section class="content-panel settings-card" data-module="MCP / 01">
+              <div class="settings-heading"><div class="square-icon purple">IO</div><div><h2>连接 Agent</h2><p>一键注册用户级 stdio；新开 Agent 会话后生效。</p></div></div>
+              <div class="status-strip" id="mcp-status-strip"></div>
+              <div class="agent-restart-notice hidden" id="agent-restart-notice"><strong>NEW SESSION REQUIRED</strong><span>注册或修复后，请完全退出并重新打开 Agent。</span></div>
+              <div class="agent-client-list" id="agent-client-list"><div class="agent-scan-placeholder">正在扫描本机 Agent</div></div>
+              <div class="button-row agent-connect-actions"><button class="button quiet" id="rescan-agents">RESCAN</button></div>
+              <details class="manual-mcp-config"><summary>OTHER AGENT / MANUAL SETUP</summary><div class="manual-config-steps"><div><b>1</b><span>打开目标 Agent 的 MCP 配置</span></div><div><b>2</b><span>按配置格式复制 JSON 或 TOML</span></div><div><b>3</b><span>粘贴保存并重新启动 Agent</span></div></div><div class="endpoint-box"><span>STDIO / LOCAL</span><code id="mcp-endpoint">kru mcp stdio</code></div><div class="button-row manual-copy-actions"><button class="button secondary" data-copy-format="stdio-json">COPY JSON</button><button class="button quiet" data-copy-format="stdio-toml">COPY TOML</button></div></details>
+            </section>
+
+            <section class="content-panel settings-card" data-module="REVIEW / 02">
+              <div class="settings-heading"><div><h2>审核模式</h2><p>Agent 每次使用秘密前，都要由你在 KRU 中明确允许。</p></div><label class="switch"><input type="checkbox" id="approval-enabled" /><span></span></label></div>
+              <div class="status-strip" id="approval-status-strip"><span class="status-dot"></span><span class="status-key">OFF</span><span>关闭时按已保存权限直接执行。</span></div>
+              <div class="approval-mode-note"><strong>60 SEC</strong><span>请求只显示调用方、项目和动作；超时或拒绝时不会使用秘密。</span></div>
+            </section>
+
+            <section class="content-panel settings-card" data-module="APP / 03">
+              <div class="settings-heading"><div><h2>窗口与提醒</h2><p>控制关闭按钮行为，以及审核请求的系统级提醒。</p></div></div>
+              <div class="desktop-options">
+                <label class="desktop-option" for="close-behavior"><span><strong>关闭按钮</strong><small>最小化可保持托盘菜单与审核提醒</small></span><select class="input" id="close-behavior"><option value="tray">最小化到托盘</option><option value="exit">退出 KRU</option></select></label>
+                <div class="desktop-option"><span><strong>审核系统弹窗</strong><small>开启后同时保留 KRU 内审核窗口</small></span><label class="switch"><input type="checkbox" id="system-approval-popup" /><span></span></label></div>
+              </div>
+            </section>
+
+            <section class="content-panel settings-card" data-module="WEB / 04">
+              <div class="settings-heading"><div class="square-icon coral">WEB</div><div><h2>Browser Bridge</h2><p>浏览器无人值守填写的可靠路径；桌面模式要求真实系统前台焦点。</p></div><label class="switch"><input type="checkbox" id="browser-enabled" /><span></span></label></div>
+              <div class="status-strip" id="browser-status-strip"></div>
+              <label class="field-label" for="browser-port">本地端口</label><div class="inline-setting"><input class="input" id="browser-port" type="number" min="1024" max="65535" /><button class="button secondary" id="save-browser-settings-button">保存</button></div>
+              <div class="browser-connect-note"><strong>ONE-TIME SETUP</strong><span>点击后已安装扩展会自动配对；首次使用只需在打开的扩展页加载目录。</span></div>
+              <div class="button-row bridge-actions"><button class="button primary" id="quick-pairing-button">一键接入浏览器</button><button class="button quiet" id="open-extension-button">扩展目录</button><button class="button danger-soft" id="reset-pairing-button">重置</button></div>
+            </section>
+
+            <section class="content-panel settings-card wide" data-module="SAFE / 05">
+              <div class="settings-heading"><div class="square-icon coral">BK</div><div><h2>本地数据</h2><p>便携备份包含秘密，不包含机器主密钥和审计记录。</p></div></div>
+              <div class="security-actions"><button class="button quiet" id="open-data-button">打开数据目录</button></div>
+            </section>
+            <div class="settings-search-empty hidden" id="settings-search-empty">NO MATCHING SETTINGS</div>
+          </div>
+          <i class="fixed-scroll-thumb" data-scroll-for="#page-settings .settings-layout" aria-hidden="true"></i>
+        </section>
+      </main>
+    </div>
+
+    <div class="owner-lock-layer" id="owner-lock-layer">
+      <form class="owner-lock-panel" id="owner-lock-form">
+        <div class="lock-display"><span>OWNER ACCESS</span><strong id="owner-lock-code">LOCK</strong><small>LOCAL GUI / MCP REMAINS READY</small></div>
+        <div class="lock-copy"><div class="panel-code" id="owner-lock-mode">SET LOCAL PIN</div><h2 id="owner-lock-title">设置六位 PIN</h2><p id="owner-lock-description">PIN 只保护用户查看明文，不影响 Agent 使用已保存秘密。</p></div>
+        <label class="field"><span>六位数字 PIN</span><div class="pin-control" data-pin-group="owner-pin"><input class="pin-cell-input" id="owner-pin" type="password" inputmode="numeric" pattern="[0-9]" maxlength="1" autocomplete="off" required /><input class="pin-cell-input" type="password" inputmode="numeric" pattern="[0-9]" maxlength="1" autocomplete="off" required /><input class="pin-cell-input" type="password" inputmode="numeric" pattern="[0-9]" maxlength="1" autocomplete="off" required /><input class="pin-cell-input" type="password" inputmode="numeric" pattern="[0-9]" maxlength="1" autocomplete="off" required /><input class="pin-cell-input" type="password" inputmode="numeric" pattern="[0-9]" maxlength="1" autocomplete="off" required /><input class="pin-cell-input" type="password" inputmode="numeric" pattern="[0-9]" maxlength="1" autocomplete="off" required /></div></label>
+        <label class="field" id="owner-pin-confirm-field"><span>再次输入 PIN</span><div class="pin-control" data-pin-group="owner-pin-confirm"><input class="pin-cell-input" id="owner-pin-confirm" type="password" inputmode="numeric" pattern="[0-9]" maxlength="1" autocomplete="off" /><input class="pin-cell-input" type="password" inputmode="numeric" pattern="[0-9]" maxlength="1" autocomplete="off" /><input class="pin-cell-input" type="password" inputmode="numeric" pattern="[0-9]" maxlength="1" autocomplete="off" /><input class="pin-cell-input" type="password" inputmode="numeric" pattern="[0-9]" maxlength="1" autocomplete="off" /><input class="pin-cell-input" type="password" inputmode="numeric" pattern="[0-9]" maxlength="1" autocomplete="off" /><input class="pin-cell-input" type="password" inputmode="numeric" pattern="[0-9]" maxlength="1" autocomplete="off" /></div></label>
+        <button class="button primary owner-unlock-action" id="owner-unlock-action" type="submit">SET PIN</button>
+        <div class="lock-note"><i></i><span>秘密仍由本机随机主密钥加密；PIN 只是本地查看锁。</span></div>
+      </form>
+    </div>
+
+    <div class="modal-backdrop hidden" id="connection-modal" role="dialog" aria-modal="true">
+      <div class="modal-card">
+        <div class="modal-header"><div class="modal-title-mark"><i aria-hidden="true"></i><h2 id="modal-title">添加项目</h2><span aria-hidden="true"></span><small>LOCAL VAULT ITEM</small></div><button class="icon-button" data-close-modal aria-label="关闭编辑器">×</button></div>
+        <form id="connection-form">
+          <input type="hidden" id="connection-id" />
+          <div class="form-scroll">
+            <div class="field-grid two identity-grid"><label class="field"><span id="connection-name-label">名称</span><input class="input" id="connection-name" maxlength="80" required /></label><label class="field"><span>说明 <em>可选</em></span><input class="input" id="connection-description" maxlength="240" /></label></div>
+
+            <section class="template-picker hidden" id="template-picker">
+              <div class="template-copy"><strong>从一个组合开始</strong><small>模板只添加模块，不会限制之后的修改。</small></div>
+              <div class="template-grid"><button type="button" data-item-template="login"><b>A</b><span>登录<small>账号 + 密码</small></span></button><button type="button" data-item-template="ssh"><b>B</b><span>SSH<small>主机 + 端口 + 账号 + 密码</small></span></button><button type="button" data-item-template="api"><b>C</b><span>API<small>API 凭据</small></span></button><button type="button" data-item-template="blank"><b>D</b><span>空白<small>从零添加模块</small></span></button></div>
+            </section>
+
+            <section class="module-editor">
+              <div class="editor-heading module-editor-heading"><div><strong>项目模块</strong><small>左侧开关控制明文是否对 Agent 可见</small></div><div class="module-add-wrap"><button type="button" class="small-button" id="add-module-button" aria-expanded="false">＋ ADD MODULE</button><div class="module-menu hidden" id="module-menu"><button type="button" data-add-module="username">账号</button><button type="button" data-add-module="password">密码</button><button type="button" data-add-module="host">主机 / IP</button><button type="button" data-add-module="port">端口</button><button type="button" data-add-module="url">服务 URL</button><button type="button" data-add-module="apiCredential">API 凭据</button><button type="button" data-add-module="privateKey">私钥</button><button type="button" data-add-module="passphrase">私钥口令</button><button type="button" data-add-module="totp">TOTP</button><button type="button" data-add-module="customSecret">自定义字段</button></div></div></div>
+              <div class="module-list" id="module-list"></div>
+              <div class="derived-status"><span>AUTO ACTIONS</span><div id="derived-actions"></div><small id="derived-help"></small></div>
+            </section>
+
+            <details class="advanced-section hidden" id="ssh-options"><summary>SSH 高级设置</summary><div class="advanced-content"><div class="field-grid ssh-policy-grid"><label class="field"><span>命令权限</span><select class="input" id="ssh-security-mode"><option value="readonly">观察（推荐）</option><option value="diagnostic">诊断</option><option value="restricted">受限命令</option><option value="unrestricted">完全控制</option></select></label><div class="field"><span>服务器身份指纹 <em>与认证方式无关</em></span><div class="trust-control"><input class="input" id="ssh-fingerprint" readonly placeholder="首次连接自动记录" /><button class="button secondary hidden" id="reset-ssh-trust" type="button">RESET</button></div></div></div><label class="field hidden" id="allowed-commands-field"><span>允许的命令前缀 <em>每行一个</em></span><textarea class="input textarea" id="ssh-allowed-commands"></textarea></label></div></details>
+
+            <label class="check-row"><input type="checkbox" id="connection-enabled" checked /><span class="check-mark"></span><span><strong>启用此项目</strong><small>禁用后 Agent 无法使用</small></span></label>
+          </div>
+          <div class="modal-footer"><div class="secret-hint">当前项目的明文只在已解锁 GUI 中显示</div><div class="button-row"><button type="button" class="button quiet" data-close-modal>取消</button><button type="submit" class="button primary" id="save-connection-button">保存</button></div></div>
+        </form>
+      </div>
+    </div>
+
+    <div class="modal-backdrop hidden" id="backup-modal" role="dialog" aria-modal="true"><div class="confirm-card backup-card"><h2 id="backup-title">便携备份</h2><p id="backup-description"></p><label class="field"><span>备份密码</span><input class="input" id="backup-password" type="password" /></label><label class="field hidden" id="backup-confirm-field"><span>再次输入</span><input class="input" id="backup-password-confirm" type="password" /></label><div class="button-row"><button class="button quiet" id="backup-cancel">取消</button><button class="button primary" id="backup-action">继续</button></div></div></div>
+    <div class="modal-backdrop approval-backdrop hidden" id="approval-modal" role="dialog" aria-modal="true" aria-labelledby="approval-title"><div class="confirm-card approval-card"><div class="approval-code">APPROVAL REQUIRED</div><h2 id="approval-title">允许本次调用？</h2><p id="approval-summary"></p><dl class="approval-details"><div><dt>调用方</dt><dd id="approval-source"></dd></div><div><dt>项目</dt><dd id="approval-item"></dd></div><div><dt>动作</dt><dd id="approval-action"></dd></div><div><dt>目标</dt><dd id="approval-detail"></dd></div></dl><div class="approval-queue" id="approval-queue"></div><div class="button-row approval-actions"><button class="button quiet" id="approval-deny" type="button">拒绝</button><button class="button primary" id="approval-allow" type="button">允许一次</button></div></div></div>
+    <div class="toast-region" id="toast-region" aria-live="polite"></div>
+    <script src="app.js"></script>
+  </body>
+</html>

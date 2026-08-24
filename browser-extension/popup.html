@@ -1,0 +1,27 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width,initial-scale=1">
+    <title>KRU</title>
+    <link rel="stylesheet" href="popup.css">
+  </head>
+  <body>
+    <header>
+      <span class="mark">MV</span>
+      <div><strong>K.R.U.</strong><small>BROWSER BRIDGE / 0.6</small></div>
+    </header>
+    <section class="status-row">
+      <span id="lamp" class="lamp"></span>
+      <div><strong id="status">CHECKING</strong><small id="detail">127.0.0.1</small></div>
+    </section>
+    <form id="pair-form">
+      <label for="port">BRIDGE PORT</label>
+      <input id="port" inputmode="numeric" value="39272" maxlength="5">
+      <button type="submit">RECONNECT LOCAL BRIDGE</button>
+      <p id="error" role="alert"></p>
+    </form>
+    <footer>LOCAL ONLY · NO SECRET VIEW</footer>
+    <script src="popup.js"></script>
+  </body>
+</html>

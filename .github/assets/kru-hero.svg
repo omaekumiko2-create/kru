@@ -1,6 +1,6 @@
 <svg xmlns="http://www.w3.org/2000/svg" width="1400" height="720" viewBox="0 0 1400 720" role="img" aria-labelledby="title desc">
   <title id="title">KRU — Key Relay Unit</title>
-  <desc id="desc">KRU is a tiny, free, no-account, cross-platform password input tool for AI agents.</desc>
+  <desc id="desc">KRU is a tiny, free, no-account, cross-platform password vault and input tool for AI agents.</desc>
   <style>
     .sans{font-family:Bahnschrift,"Segoe UI Variable","Segoe UI",Arial,sans-serif}
     .mono{font-family:"Cascadia Mono",Consolas,monospace}
@@ -25,8 +25,8 @@
   <g transform="translate(72 120)">
     <text y="108" class="sans ink" font-size="116" font-weight="300" letter-spacing="8">KRU</text>
     <line x1="276" y1="18" x2="276" y2="112" class="rule"/>
-    <text x="318" y="54" class="sans ink" font-size="35" font-weight="600">A TINY PASSWORD INPUT TOOL</text>
-    <text x="318" y="102" class="sans ink" font-size="35" font-weight="600">FOR AI AGENTS.</text>
+    <text x="318" y="54" class="sans ink" font-size="35" font-weight="600">A MODULAR PASSWORD VAULT</text>
+    <text x="318" y="102" class="sans ink" font-size="35" font-weight="600">AND INPUT TOOL FOR AI AGENTS.</text>
     <g transform="translate(1032 14)">
       <text class="mono muted" font-size="9" letter-spacing="1.4">WINDOWS APP</text>
       <text y="39" class="instrument ink" font-size="38" font-weight="300">8.55</text>

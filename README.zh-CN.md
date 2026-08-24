@@ -3,7 +3,7 @@
 </p>
 
 <p align="center">
-  <strong>一个超小型、完全免费、无需账号、跨平台的 Agent 密码输入器。</strong>
+  <strong>一个超小型、完全免费、无需账号、跨平台的 Agent 密码保存与输入器。</strong>
 </p>
 
 <p align="center">
@@ -23,6 +23,8 @@
 ## KRU 是什么
 
 KRU 是一个本地 MCP 工具：它在不中断 Agent 工作流的同时，避免 Agent 直接接触密码及其他凭据的明文。Agent 只需把最后一步认证操作交给 KRU，由 KRU 在本地完成输入或认证。
+
+账号、密码、API 凭据、私钥、TOTP、主机、端口和 URL 都可以作为独立模块保存，并自由组合成登录、SSH、API 或混合项目。
 
 KRU 没有账号、订阅或云端密码库。它完全免费且开源，支持 Windows、macOS 和 Linux，所有密码库数据都在本地加密保存。
 

@@ -3,7 +3,7 @@
 </p>
 
 <p align="center">
-  <strong>A tiny, completely free, no-account, cross-platform password input tool for AI agents.</strong>
+  <strong>A tiny, completely free, no-account, cross-platform password vault and input tool for AI agents.</strong>
 </p>
 
 <p align="center">
@@ -23,6 +23,8 @@
 ## What KRU does
 
 KRU is a local MCP tool that keeps agent workflows moving without exposing plaintext passwords or other credentials to the agent. The agent hands off the final authentication step, and KRU performs it locally.
+
+Usernames, passwords, API credentials, private keys, TOTP, hosts, ports, and URLs are saved as independent modules that can be freely combined into login, SSH, API, or mixed items.
 
 There is no KRU account, subscription, or cloud vault. The app is completely free and open source, runs on Windows, macOS, and Linux, and encrypts its vault locally.
 

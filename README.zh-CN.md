@@ -7,7 +7,7 @@
 </p>
 
 <p align="center">
-  Windows 主程序不到 10 MB&nbsp;&nbsp;·&nbsp;&nbsp;完全本地&nbsp;&nbsp;·&nbsp;&nbsp;免费开源&nbsp;&nbsp;·&nbsp;&nbsp;无需账号&nbsp;&nbsp;·&nbsp;&nbsp;Windows / macOS / Linux
+  完全本地&nbsp;&nbsp;·&nbsp;&nbsp;免费开源&nbsp;&nbsp;·&nbsp;&nbsp;无需账号&nbsp;&nbsp;·&nbsp;&nbsp;Windows / macOS / Linux
 </p>
 
 <p align="center">

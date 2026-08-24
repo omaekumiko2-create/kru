@@ -7,7 +7,7 @@
 </p>
 
 <p align="center">
-  Windows app under 10 MB&nbsp;&nbsp;·&nbsp;&nbsp;Local only&nbsp;&nbsp;·&nbsp;&nbsp;Free and open source&nbsp;&nbsp;·&nbsp;&nbsp;No account&nbsp;&nbsp;·&nbsp;&nbsp;Windows / macOS / Linux
+  Local only&nbsp;&nbsp;·&nbsp;&nbsp;Free and open source&nbsp;&nbsp;·&nbsp;&nbsp;No account&nbsp;&nbsp;·&nbsp;&nbsp;Windows / macOS / Linux
 </p>
 
 <p align="center">

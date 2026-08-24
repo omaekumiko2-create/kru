@@ -7,7 +7,7 @@
 </p>
 
 <p align="center">
-  Local only&nbsp;&nbsp;·&nbsp;&nbsp;Free and open source&nbsp;&nbsp;·&nbsp;&nbsp;No account&nbsp;&nbsp;·&nbsp;&nbsp;Windows / macOS / Linux
+  Windows app under 10 MB&nbsp;&nbsp;·&nbsp;&nbsp;Local only&nbsp;&nbsp;·&nbsp;&nbsp;Free and open source&nbsp;&nbsp;·&nbsp;&nbsp;No account&nbsp;&nbsp;·&nbsp;&nbsp;Windows / macOS / Linux
 </p>
 
 <p align="center">
@@ -25,6 +25,8 @@
 KRU is a small local tool that enters passwords and other credentials for your AI agents. Connect it once, save the values you need, and let the agent hand off the final authentication step to KRU—without receiving the hidden plaintext.
 
 There is no KRU account, subscription, or cloud vault. The app is completely free and open source, runs on Windows, macOS, and Linux, and encrypts its vault locally.
+
+The current Windows executable is **8.55 MiB**, and the portable download is about **3.84 MiB**. Its local `stdio` MCP starts only when an agent calls it—there is no always-on remote service.
 
 <table>
   <tr>

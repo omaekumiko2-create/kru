@@ -7,7 +7,7 @@
 </p>
 
 <p align="center">
-  完全本地&nbsp;&nbsp;·&nbsp;&nbsp;免费开源&nbsp;&nbsp;·&nbsp;&nbsp;无需账号&nbsp;&nbsp;·&nbsp;&nbsp;Windows / macOS / Linux
+  Windows 主程序不到 10 MB&nbsp;&nbsp;·&nbsp;&nbsp;完全本地&nbsp;&nbsp;·&nbsp;&nbsp;免费开源&nbsp;&nbsp;·&nbsp;&nbsp;无需账号&nbsp;&nbsp;·&nbsp;&nbsp;Windows / macOS / Linux
 </p>
 
 <p align="center">
@@ -25,6 +25,8 @@
 KRU 是一个为 AI Agent 输入密码及其他凭据的本地小工具。连接一次、保存需要的值，之后 Agent 就能把最后一步认证操作交给 KRU，而不必取得隐藏的明文。
 
 KRU 没有账号、订阅或云端密码库。它完全免费且开源，支持 Windows、macOS 和 Linux，所有密码库数据都在本地加密保存。
+
+当前 Windows 主程序仅 **8.55 MiB**，便携下载包约 **3.84 MiB**。本地 `stdio` MCP 只在 Agent 调用时启动，无需常驻远程服务，日常使用几乎无感。
 
 <table>
   <tr>

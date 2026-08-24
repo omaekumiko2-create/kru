@@ -26,13 +26,13 @@
 
     <line x1="6" y1="310" x2="444" y2="310" class="line"/>
     <path d="M6 310v22m438-22v22" fill="none" class="line"/>
-    <text x="6" y="368" class="sans muted body">Free, no-account and cross-platform.</text>
-    <text x="6" y="398" class="sans muted body">KRU performs the final authentication step</text>
-    <text x="6" y="428" class="sans muted body">without giving hidden values to the agent.</text>
+    <text x="6" y="368" class="sans muted body">Under 10 MB. Free. No account.</text>
+    <text x="6" y="398" class="sans muted body">Cross-platform and started only when needed.</text>
+    <text x="6" y="428" class="sans muted body">Hidden values stay outside agent context.</text>
 
     <g transform="translate(6 498)">
       <rect width="142" height="46" class="orange"/>
-      <text x="71" y="29" text-anchor="middle" class="mono paper" font-size="12" font-weight="700">LOCAL FIRST</text>
+      <text x="71" y="29" text-anchor="middle" class="mono paper" font-size="12" font-weight="700">UNDER 10 MB</text>
       <rect x="154" width="142" height="46" fill="#fbfaf9" stroke="#bbb6b2"/>
       <text x="225" y="29" text-anchor="middle" class="mono ink" font-size="12" font-weight="700">OPEN SOURCE</text>
       <rect x="308" width="136" height="46" fill="#5e605f"/>

@@ -55,6 +55,21 @@ The current Windows executable is **8.55 MiB**, and the portable download is abo
 
 KRU registers a local `stdio` MCP command. It starts when the agent needs it; no remote MCP endpoint is exposed.
 
+## Ask for the task, not the password
+
+> **Connect once, save once, then describe the task as usual: the agent handles the workflow, while KRU uses the credential locally only at the final step.**
+
+Tell the agent only the **KRU item name + desired outcome**. You do not need to provide a password, token, private key, or MCP tool name.
+
+| Scenario | Example request |
+| --- | --- |
+| **Connect to a VPS** | `Use "Production VPS" from KRU to connect to the server and check disk, memory, and Docker service status.` |
+| **Call an API** | `Use the "Cloudflare API" credential from KRU to list the current DNS records for example.com.` |
+| **Sign in on the web** | `On the current login page, use "Work Account" from KRU to fill the username, password, and TOTP, then continue signing in.` |
+| **Authenticate a CLI** | `Start the gh login flow and use "GitHub Token" from KRU to complete authentication.` |
+
+The quoted text is the item name saved in KRU. Clear item names make it easier for the agent to select the intended credential.
+
 ## One vault, several last-mile actions
 
 | Action | What the agent decides | What KRU does locally |

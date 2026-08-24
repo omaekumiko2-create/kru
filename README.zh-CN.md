@@ -3,11 +3,11 @@
 </p>
 
 <p align="center">
-  <strong>让 Agent 使用凭据，而不必看到凭据。</strong>
+  <strong>一个超小型、完全免费、无需账号、跨平台的 Agent 密码输入器。</strong>
 </p>
 
 <p align="center">
-  本地运行&nbsp;&nbsp;·&nbsp;&nbsp;免费开源&nbsp;&nbsp;·&nbsp;&nbsp;无需账号&nbsp;&nbsp;·&nbsp;&nbsp;便携使用
+  完全本地&nbsp;&nbsp;·&nbsp;&nbsp;免费开源&nbsp;&nbsp;·&nbsp;&nbsp;无需账号&nbsp;&nbsp;·&nbsp;&nbsp;Windows / macOS / Linux
 </p>
 
 <p align="center">
@@ -20,11 +20,11 @@
 
 ---
 
-## 解决 Agent 认证的最后一步
+## KRU 是什么
 
-把密码明文交给 Agent 并不安全，但每次都停下来手动输入，又会打断自动化流程。
+KRU 是一个为 AI Agent 输入密码及其他凭据的本地小工具。连接一次、保存需要的值，之后 Agent 就能把最后一步认证操作交给 KRU，而不必取得隐藏的明文。
 
-KRU 负责两者之间的最后一步。先把 KRU 连接到 Agent，再一次性保存凭据；登录或认证时由 Agent 把最终操作交给 KRU。KRU 在本地解密并使用凭据，隐藏值无需进入对话或模型上下文。
+KRU 没有账号、订阅或云端密码库。它完全免费且开源，支持 Windows、macOS 和 Linux，所有密码库数据都在本地加密保存。
 
 <table>
   <tr>

@@ -3,11 +3,11 @@
 </p>
 
 <p align="center">
-  <strong>Let agents use credentials without seeing them.</strong>
+  <strong>A tiny, completely free, no-account, cross-platform password input tool for AI agents.</strong>
 </p>
 
 <p align="center">
-  Local-first&nbsp;&nbsp;·&nbsp;&nbsp;Free and open source&nbsp;&nbsp;·&nbsp;&nbsp;No account&nbsp;&nbsp;·&nbsp;&nbsp;Portable
+  Local only&nbsp;&nbsp;·&nbsp;&nbsp;Free and open source&nbsp;&nbsp;·&nbsp;&nbsp;No account&nbsp;&nbsp;·&nbsp;&nbsp;Windows / macOS / Linux
 </p>
 
 <p align="center">
@@ -20,11 +20,11 @@
 
 ---
 
-## The last mile for agent authentication
+## What KRU does
 
-Giving an AI agent a plaintext password is risky. Stopping every task to type it yourself defeats the point of automation.
+KRU is a small local tool that enters passwords and other credentials for your AI agents. Connect it once, save the values you need, and let the agent hand off the final authentication step to KRU—without receiving the hidden plaintext.
 
-KRU handles the step in between. Connect KRU to your agent, save a credential once, and let the agent hand off the final authentication action. KRU decrypts and uses the credential locally; the hidden value does not need to enter the conversation or model context.
+There is no KRU account, subscription, or cloud vault. The app is completely free and open source, runs on Windows, macOS, and Linux, and encrypts its vault locally.
 
 <table>
   <tr>

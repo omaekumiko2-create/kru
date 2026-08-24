@@ -1,6 +1,6 @@
 <svg xmlns="http://www.w3.org/2000/svg" width="1400" height="820" viewBox="0 0 1400 820" role="img" aria-labelledby="title desc">
   <title id="title">KRU — Key Relay Unit</title>
-  <desc id="desc">A local credential relay for AI agents, shown beside the KRU desktop interface.</desc>
+  <desc id="desc">A tiny, free, no-account, cross-platform password input tool for AI agents, shown beside the KRU desktop interface.</desc>
   <defs>
     <filter id="shadow" x="-20%" y="-20%" width="140%" height="150%">
       <feDropShadow dx="0" dy="14" stdDeviation="16" flood-color="#262626" flood-opacity="0.18"/>
@@ -21,14 +21,14 @@
     <text x="210" y="17" class="mono muted tiny">KEY RELAY UNIT</text>
 
     <text y="178" class="sans ink title">KRU</text>
-    <text x="6" y="224" class="sans ink" font-size="32" font-weight="600">CREDENTIALS STAY LOCAL.</text>
-    <text x="6" y="264" class="sans ink" font-size="32" font-weight="600">AGENTS KEEP WORKING.</text>
+    <text x="6" y="224" class="sans ink" font-size="32" font-weight="600">TINY PASSWORD INPUT.</text>
+    <text x="6" y="264" class="sans ink" font-size="32" font-weight="600">BUILT FOR AI AGENTS.</text>
 
     <line x1="6" y1="310" x2="444" y2="310" class="line"/>
     <path d="M6 310v22m438-22v22" fill="none" class="line"/>
-    <text x="6" y="368" class="sans muted body">A small, open-source relay for the final</text>
-    <text x="6" y="398" class="sans muted body">authentication step—without putting hidden</text>
-    <text x="6" y="428" class="sans muted body">credentials into the agent conversation.</text>
+    <text x="6" y="368" class="sans muted body">Free, no-account and cross-platform.</text>
+    <text x="6" y="398" class="sans muted body">KRU performs the final authentication step</text>
+    <text x="6" y="428" class="sans muted body">without giving hidden values to the agent.</text>
 
     <g transform="translate(6 498)">
       <rect width="142" height="46" class="orange"/>

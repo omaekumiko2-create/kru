@@ -40,8 +40,8 @@
     </g>
 
     <g transform="translate(6 596)">
-      <text y="0" class="mono orange tiny">01</text><text x="34" class="mono ink tiny">SAVE ONCE</text>
-      <text x="148" class="mono orange tiny">02</text><text x="182" class="mono ink tiny">CONNECT</text>
+      <text y="0" class="mono orange tiny">01</text><text x="34" class="mono ink tiny">CONNECT</text>
+      <text x="148" class="mono orange tiny">02</text><text x="182" class="mono ink tiny">SAVE ONCE</text>
       <text x="286" class="mono orange tiny">03</text><text x="320" class="mono ink tiny">HAND OFF</text>
       <line y1="19" x2="444" y2="19" class="softLine"/>
       <rect y="31" width="444" height="3" class="orange"/>

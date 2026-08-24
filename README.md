@@ -24,7 +24,7 @@
 
 Giving an AI agent a plaintext password is risky. Stopping every task to type it yourself defeats the point of automation.
 
-KRU handles the step in between. Save a credential once, connect KRU to your agent, and let the agent hand off the final authentication action. KRU decrypts and uses the credential locally; the hidden value does not need to enter the conversation or model context.
+KRU handles the step in between. Connect KRU to your agent, save a credential once, and let the agent hand off the final authentication action. KRU decrypts and uses the credential locally; the hidden value does not need to enter the conversation or model context.
 
 <table>
   <tr>
@@ -40,14 +40,14 @@ KRU handles the step in between. Save a credential once, connect KRU to your age
 
 ## Start in three steps
 
-1. **Download and open KRU**  
+1. **Download and open KRU**
    Use the portable build for your platform. There is no account to create.
 
-2. **Save one item**  
-   Add only the modules you need: username, password, API credential, private key, TOTP, host, port, URL, or a custom field.
+2. **Connect your agent**
+   Open **System → Agent connection** and register a supported client.
 
-3. **Connect your agent**  
-   Open **System → Agent connection**, register a supported client, then start a new agent session.
+3. **Save one item and start a new session**
+   Add only the modules you need, then start a new agent session with KRU available.
 
 KRU registers a local `stdio` MCP command. It starts when the agent needs it; no remote MCP endpoint is exposed.
 

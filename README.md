@@ -30,6 +30,20 @@ There is no KRU account, subscription, or cloud vault. The app is completely fre
 
 The current Windows executable is **8.55 MiB**, and the portable download is about **3.84 MiB**. Its local `stdio` MCP starts only when an agent calls it—there is no always-on remote service.
 
+## Use KRU like this
+
+Once KRU is connected, there is no new command syntax to learn—and no password to paste into the conversation. Ask the agent for the task as usual:
+
+| Pattern | Example |
+| --- | --- |
+| **Item name + task** | `Use "<item name>" from KRU to <task>.` |
+| **Use when sign-in is needed** | `Continue this task. If you need to sign in, use KRU.` |
+| **Use when authentication is needed** | `Call this API. If authentication is required, use an appropriate item from KRU.` |
+| **Connect to a VPS** | `Use "Production VPS" from KRU to check the server's disk, memory, and Docker status.` |
+| **Sign in on the web** | `Open the Cloudflare dashboard. When sign-in is required, use "Cloudflare Account" from KRU.` |
+
+`<item name>` is the name saved in KRU. Clear names help the agent select the intended item; when no name is given, the agent can choose from the items KRU makes available.
+
 <table>
   <tr>
     <td width="33%"><strong>01 / STORE</strong><br><br>Credentials are encrypted on your machine. No KRU account or cloud vault.</td>
@@ -54,21 +68,6 @@ The current Windows executable is **8.55 MiB**, and the portable download is abo
    Add only the modules you need, then start a new agent session with KRU available.
 
 KRU registers a local `stdio` MCP command. It starts when the agent needs it; no remote MCP endpoint is exposed.
-
-## Ask for the task, not the password
-
-> **Connect once, save once, then describe the task as usual: the agent handles the workflow, while KRU uses the credential locally only at the final step.**
-
-Tell the agent only the **KRU item name + desired outcome**. You do not need to provide a password, token, private key, or MCP tool name.
-
-| Scenario | Example request |
-| --- | --- |
-| **Connect to a VPS** | `Use "Production VPS" from KRU to connect to the server and check disk, memory, and Docker service status.` |
-| **Call an API** | `Use the "Cloudflare API" credential from KRU to list the current DNS records for example.com.` |
-| **Sign in on the web** | `On the current login page, use "Work Account" from KRU to fill the username, password, and TOTP, then continue signing in.` |
-| **Authenticate a CLI** | `Start the gh login flow and use "GitHub Token" from KRU to complete authentication.` |
-
-The quoted text is the item name saved in KRU. Clear item names make it easier for the agent to select the intended credential.
 
 ## One vault, several last-mile actions
 

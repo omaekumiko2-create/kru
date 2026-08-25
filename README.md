@@ -22,17 +22,17 @@
 
 ## Use KRU like this
 
-Tell the agent which KRU item to use and what to do, or simply ask it to use KRU whenever sign-in or authentication is required. Never paste the password into the conversation.
+No commands to memorize and no credentials to paste into the conversation. Just give the agent a KRU item name and a task:
 
 | Use case | Say this to your agent |
 | --- | --- |
-| **Item name + task** | `Use "TraceScale GPU VPS" from KRU to check GPU, disk, and Docker status.` |
-| **Use when sign-in is needed** | `Continue this task. When a sign-in step appears, use KRU.` |
-| **Connect to a server** | `Connect to "Production VPS" in KRU, deploy the current project, and verify its status.` |
-| **Call an API** | `Use "Cloudflare API" from KRU to list the domains in this account.` |
-| **Sign in on the web** | `Open the Cloudflare dashboard and use "Cloudflare Account" from KRU when sign-in is required.` |
+| **Item name + task** | `Use the KRU item "TraceScale GPU VPS" to check GPU, disk, and Docker status.` |
+| **Use when authentication is needed** | `Continue the deployment. If sign-in or authentication is required, use KRU.` |
+| **Connect to a server** | `Use the KRU item "Production VPS" to connect, deploy the current project, and verify the service.` |
+| **Call an API** | `Use the KRU item "Cloudflare API" to list the domains in this account.` |
+| **Sign in on the web** | `Open the Cloudflare dashboard. When it asks for an account, password, or code, use the KRU item "Cloudflare Account".` |
 
-The item name is the name saved in KRU. Naming it explicitly is the most precise option; when you are unsure, the agent can choose from the items KRU exposes.
+The item name is the name saved in KRU. Naming it explicitly is most precise; when you are unsure, the agent can choose from the items KRU exposes.
 
 ## What KRU does
 

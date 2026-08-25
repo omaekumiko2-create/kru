@@ -20,6 +20,20 @@
 
 ---
 
+## Use KRU like this
+
+Tell the agent which KRU item to use and what to do, or simply ask it to use KRU whenever sign-in or authentication is required. Never paste the password into the conversation.
+
+| Use case | Say this to your agent |
+| --- | --- |
+| **Item name + task** | `Use "TraceScale GPU VPS" from KRU to check GPU, disk, and Docker status.` |
+| **Use when sign-in is needed** | `Continue this task. When a sign-in step appears, use KRU.` |
+| **Connect to a server** | `Connect to "Production VPS" in KRU, deploy the current project, and verify its status.` |
+| **Call an API** | `Use "Cloudflare API" from KRU to list the domains in this account.` |
+| **Sign in on the web** | `Open the Cloudflare dashboard and use "Cloudflare Account" from KRU when sign-in is required.` |
+
+The item name is the name saved in KRU. Naming it explicitly is the most precise option; when you are unsure, the agent can choose from the items KRU exposes.
+
 ## What KRU does
 
 KRU is a local MCP tool that keeps agent workflows moving without exposing plaintext passwords or other credentials to the agent. The agent hands off the final authentication step, and KRU performs it locally.
@@ -29,20 +43,6 @@ Usernames, passwords, API credentials, private keys, TOTP, hosts, ports, and URL
 There is no KRU account, subscription, or cloud vault. The app is completely free and open source, runs on Windows, macOS, and Linux, and encrypts its vault locally.
 
 The current Windows executable is **8.55 MiB**, and the portable download is about **3.84 MiB**. Its local `stdio` MCP starts only when an agent calls it—there is no always-on remote service.
-
-## Use KRU like this
-
-Once KRU is connected, there is no new command syntax to learn—and no password to paste into the conversation. Ask the agent for the task as usual:
-
-| Pattern | Example |
-| --- | --- |
-| **Item name + task** | `Use "<item name>" from KRU to <task>.` |
-| **Use when sign-in is needed** | `Continue this task. If you need to sign in, use KRU.` |
-| **Use when authentication is needed** | `Call this API. If authentication is required, use an appropriate item from KRU.` |
-| **Connect to a VPS** | `Use "Production VPS" from KRU to check the server's disk, memory, and Docker status.` |
-| **Sign in on the web** | `Open the Cloudflare dashboard. When sign-in is required, use "Cloudflare Account" from KRU.` |
-
-`<item name>` is the name saved in KRU. Clear names help the agent select the intended item; when no name is given, the agent can choose from the items KRU makes available.
 
 <table>
   <tr>

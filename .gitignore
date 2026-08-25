@@ -4,4 +4,8 @@
 /src-tauri/gen/
 /dist/
 .DS_Store
+*.p12
+*.p8
+AuthKey_*.p8
+certificate-base64.txt
 *.mvault

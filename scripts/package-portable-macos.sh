@@ -42,9 +42,17 @@ mkdir -p "$package_root/.github/assets"
 cp "$project_root/.github/assets/kru-hero.svg" "$project_root/.github/assets/kru-flow.svg" "$package_root/.github/assets/"
 cp -R "$project_root/browser-extension" "$package_root/browser-extension"
 
-# Ad-hoc signing keeps the local bundle internally consistent. Public releases
-# can replace this with Developer ID signing and notarization later.
-/usr/bin/codesign --force --deep --sign - "$package_root/KRU.app"
+signature_details="$(/usr/bin/codesign --display --verbose=4 "$package_root/KRU.app" 2>&1 || true)"
+if grep -Fq "Authority=Developer ID Application:" <<<"$signature_details"; then
+  echo "Preserving the existing Developer ID signature."
+  /usr/bin/codesign --verify --deep --strict --verbose=2 "$package_root/KRU.app"
+elif [[ "${KRU_REQUIRE_DEVELOPER_ID:-0}" == "1" ]]; then
+  echo "A Developer ID signature is required for this release package." >&2
+  exit 1
+else
+  # Apple Silicon requires a structurally signed bundle even for local builds.
+  /usr/bin/codesign --force --deep --sign - "$package_root/KRU.app"
+fi
 
 (
   cd "$package_root"

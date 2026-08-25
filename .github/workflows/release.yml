@@ -32,7 +32,8 @@ jobs:
             dist/*.sha256
 
   macos:
-    runs-on: macos-14
+    runs-on: macos-15
+    timeout-minutes: 90
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
@@ -43,13 +44,106 @@ jobs:
           node-version: "22"
           cache: npm
       - run: npm ci
-      - run: npm run release:mac
+      - name: Validate Apple signing secrets
+        env:
+          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          APPLE_API_ISSUER: ${{ secrets.APPLE_API_ISSUER }}
+          APPLE_API_KEY: ${{ secrets.APPLE_API_KEY }}
+          APPLE_API_KEY_P8_BASE64: ${{ secrets.APPLE_API_KEY_P8_BASE64 }}
+          KEYCHAIN_PASSWORD: ${{ secrets.KEYCHAIN_PASSWORD }}
+        run: |
+          for secret_name in \
+            APPLE_CERTIFICATE \
+            APPLE_CERTIFICATE_PASSWORD \
+            APPLE_API_ISSUER \
+            APPLE_API_KEY \
+            APPLE_API_KEY_P8_BASE64 \
+            KEYCHAIN_PASSWORD
+          do
+            if [[ -z "${!secret_name:-}" ]]; then
+              echo "Missing required GitHub Actions secret: $secret_name" >&2
+              exit 1
+            fi
+          done
+      - name: Import Developer ID certificate
+        env:
+          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          KEYCHAIN_PASSWORD: ${{ secrets.KEYCHAIN_PASSWORD }}
+        run: |
+          umask 077
+          certificate_path="$RUNNER_TEMP/developer-id-application.p12"
+          keychain_path="$RUNNER_TEMP/kru-signing.keychain-db"
+          printf '%s' "$APPLE_CERTIFICATE" | \
+            openssl base64 -d -A -out "$certificate_path"
+          security create-keychain -p "$KEYCHAIN_PASSWORD" "$keychain_path"
+          security default-keychain -s "$keychain_path"
+          security unlock-keychain -p "$KEYCHAIN_PASSWORD" "$keychain_path"
+          security set-keychain-settings -lut 21600 "$keychain_path"
+          security import "$certificate_path" \
+            -k "$keychain_path" \
+            -P "$APPLE_CERTIFICATE_PASSWORD" \
+            -T /usr/bin/codesign
+          security set-key-partition-list \
+            -S apple-tool:,apple:,codesign: \
+            -s \
+            -k "$KEYCHAIN_PASSWORD" \
+            "$keychain_path"
+          cert_info="$(security find-identity -v -p codesigning "$keychain_path" | \
+            grep 'Developer ID Application:' | head -n 1)"
+          signing_identity="$(awk -F'"' '{print $2}' <<<"$cert_info")"
+          test -n "$signing_identity"
+          echo "APPLE_SIGNING_IDENTITY=$signing_identity" >> "$GITHUB_ENV"
+          echo "Imported signing identity: $signing_identity"
+      - name: Prepare App Store Connect API key
+        env:
+          APPLE_API_KEY: ${{ secrets.APPLE_API_KEY }}
+          APPLE_API_KEY_P8_BASE64: ${{ secrets.APPLE_API_KEY_P8_BASE64 }}
+        run: |
+          umask 077
+          api_key_path="$RUNNER_TEMP/AuthKey_${APPLE_API_KEY}.p8"
+          printf '%s' "$APPLE_API_KEY_P8_BASE64" | \
+            openssl base64 -d -A -out "$api_key_path"
+          grep -Fq -- "-----BEGIN PRIVATE KEY-----" "$api_key_path"
+          echo "APPLE_API_KEY_PATH=$api_key_path" >> "$GITHUB_ENV"
+      - name: Build, sign, notarize, and staple macOS application
+        env:
+          APPLE_API_ISSUER: ${{ secrets.APPLE_API_ISSUER }}
+          APPLE_API_KEY: ${{ secrets.APPLE_API_KEY }}
+        run: npm run build:mac
+      - name: Verify signed and notarized macOS application
+        run: bash scripts/verify-notarized-macos.sh src-tauri/target/release/bundle/macos/KRU.app
+      - name: Package notarized macOS application
+        env:
+          KRU_REQUIRE_DEVELOPER_ID: '1'
+        run: npm run portable:mac
+      - name: Verify packaged macOS application
+        run: |
+          archives=(dist/*-portable.zip)
+          test ${#archives[@]} -eq 1
+          (cd dist && shasum -a 256 -c *.sha256)
+          work="$(mktemp -d)"
+          trap 'rm -rf "$work"' EXIT
+          ditto -x -k "${archives[0]}" "$work"
+          app_count="$(find "$work" -type d -name KRU.app -prune | wc -l | tr -d ' ')"
+          test "$app_count" -eq 1
+          app_path="$(find "$work" -type d -name KRU.app -prune -print -quit)"
+          bash scripts/verify-notarized-macos.sh "$app_path"
       - uses: actions/upload-artifact@v4
         with:
           name: macos-arm64-portable
+          if-no-files-found: error
           path: |
             dist/*.zip
             dist/*.sha256
+      - name: Remove Apple signing material
+        if: always()
+        run: |
+          security delete-keychain "$RUNNER_TEMP/kru-signing.keychain-db" 2>/dev/null || true
+          rm -f \
+            "$RUNNER_TEMP/developer-id-application.p12" \
+            "$RUNNER_TEMP"/AuthKey_*.p8
 
   linux-gui:
     runs-on: ubuntu-22.04

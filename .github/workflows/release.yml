@@ -107,11 +107,13 @@ jobs:
             openssl base64 -d -A -out "$api_key_path"
           grep -Fq -- "-----BEGIN PRIVATE KEY-----" "$api_key_path"
           echo "APPLE_API_KEY_PATH=$api_key_path" >> "$GITHUB_ENV"
-      - name: Build, sign, notarize, and staple macOS application
+      - name: Build and sign macOS application
+        run: npm run build:mac
+      - name: Notarize and staple macOS application
         env:
           APPLE_API_ISSUER: ${{ secrets.APPLE_API_ISSUER }}
           APPLE_API_KEY: ${{ secrets.APPLE_API_KEY }}
-        run: npm run build:mac
+        run: bash scripts/notarize-macos.sh src-tauri/target/release/bundle/macos/KRU.app
       - name: Verify signed and notarized macOS application
         run: bash scripts/verify-notarized-macos.sh src-tauri/target/release/bundle/macos/KRU.app
       - name: Package notarized macOS application

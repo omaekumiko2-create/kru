@@ -16,7 +16,10 @@ if (isMacOS) {
   titleDragRegion.addEventListener('dragstart', (event) => event.preventDefault());
 }
 
-let language = localStorage.getItem('kru-language') === 'en' ? 'en' : 'zh';
+// Keep the first paint deterministic. The persisted setting from the vault is
+// applied by refresh(); browser storage can survive an app reinstall and must
+// not override the English default while the native state is loading.
+let language = 'en';
 
 function localized(zh, en) {
   return language === 'en' ? en : zh;
@@ -113,7 +116,6 @@ const staticCopy = [
 
 function applyLanguage() {
   document.documentElement.lang = language === 'en' ? 'en' : 'zh-CN';
-  localStorage.setItem('kru-language', language);
   $$('.language-switch button').forEach((button) => button.classList.toggle('active', button.dataset.language === language));
   for (const [selector, target, zh, en] of staticCopy) {
     const element = $(selector);

@@ -43,7 +43,7 @@ pub struct SettingsPatch {
 impl Default for Settings {
     fn default() -> Self {
         Self {
-            language: "zh".to_owned(),
+            language: "en".to_owned(),
             close_behavior: "tray".to_owned(),
             browser_enabled: false,
             browser_port: 39_272,
@@ -64,7 +64,7 @@ mod settings_tests {
         )
         .unwrap();
         assert_eq!(settings.agent_mcp_onboarding_version, 0);
-        assert_eq!(settings.language, "zh");
+        assert_eq!(settings.language, "en");
         assert_eq!(settings.close_behavior, "tray");
     }
 }

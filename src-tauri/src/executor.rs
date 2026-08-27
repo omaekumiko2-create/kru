@@ -1,8 +1,8 @@
 use crate::{
     model::{SecretBundle, StoredConnection},
     policy::{
-        assert_api_request_allowed, assert_ssh_command_allowed, blocked_header_names, redact,
-        safe_response_headers,
+        assert_api_request_allowed, blocked_header_names, redact, safe_response_headers,
+        validate_ssh_command,
     },
     vault::{DecryptedConnection, Vault},
 };
@@ -33,7 +33,7 @@ const MAX_RESULT_LENGTH: usize = 200_000;
 #[serde(rename_all = "camelCase")]
 pub struct ApiRequestInput {
     #[serde(default)]
-    #[schemars(description = "可选绝对 URL；项目未保存 URL 时必填")]
+    #[schemars(description = "Optional absolute URL. Required when the item has no saved URL.")]
     pub url: String,
     #[serde(default = "default_method")]
     pub method: String,
@@ -161,7 +161,7 @@ pub async fn execute_ssh(
     if !connection.stored.enabled {
         bail!("该连接已禁用");
     }
-    let command = assert_ssh_command_allowed(&connection.stored, command)?;
+    let command = validate_ssh_command(command)?;
     let command = match cwd.map(str::trim).filter(|value| !value.is_empty()) {
         Some(cwd) => format!("cd -- {} && {command}", shell_quote(cwd)),
         None => command,
@@ -319,11 +319,10 @@ async fn execute_ssh_inner(
 
 pub async fn test_connection(vault: &Vault, connection: &DecryptedConnection) -> Result<String> {
     if connection.stored.has_capability("ssh") {
-        let mut testable = DecryptedConnection {
+        let testable = DecryptedConnection {
             stored: connection.stored.clone(),
             secrets: connection.secrets.clone(),
         };
-        testable.stored.security_mode = "unrestricted".to_owned();
         let result = execute_ssh(vault, &testable, "printf 'mcp-vault-ok'", None).await?;
         if result.stdout != "mcp-vault-ok" {
             bail!("VPS 返回了意外结果：{}", result.stderr);
@@ -655,8 +654,6 @@ mod tests {
             host_fingerprint: String::new(),
             host_fingerprint_host: String::new(),
             host_fingerprint_port: 0,
-            security_mode: String::new(),
-            allowed_commands: vec![],
             base_url,
             auth_header: "X-API-Key".into(),
             auth_location: "header".into(),

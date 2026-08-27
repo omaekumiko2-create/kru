@@ -42,7 +42,7 @@ Usernames, passwords, API credentials, private keys, TOTP, hosts, ports, and URL
 
 There is no KRU account, subscription, or cloud vault. The app is completely free and open source, runs on Windows, macOS, and Linux, and encrypts its vault locally.
 
-The current Windows executable is **8.55 MiB**, and the portable download is about **3.84 MiB**. Its local `stdio` MCP starts only when an agent calls it—there is no always-on remote service.
+Its local `stdio` MCP starts only when an agent calls it—there is no always-on remote service.
 
 <table>
   <tr>
@@ -88,8 +88,6 @@ Each module has its own Agent visibility switch:
 - **Visible** — KRU may return that module value to the agent when you explicitly enable it.
 - **TOTP** — KRU derives the current six-digit code; the permanent seed is never returned.
 
-Optional **Review mode** pauses every secret use for a one-time local approval. The request shows the caller, item, action, and target—never the credential itself.
-
 ## Built for local use
 
 <table>
@@ -106,7 +104,7 @@ Unattended browser filling uses the bundled Chromium extension. KRU supplies one
 
 ### Local PIN
 
-The six-digit PIN locks plaintext viewing and local approvals in the GUI. It is an owner-view lock, not the vault encryption key. KRU has no PIN recovery flow in the current release.
+The six-digit PIN locks plaintext viewing in the GUI. It is an owner-view lock, not the vault encryption key. KRU has no PIN recovery flow in the current release.
 
 ## Downloads
 

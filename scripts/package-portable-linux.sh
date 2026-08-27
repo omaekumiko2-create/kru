@@ -16,9 +16,18 @@ case "$(uname -m)" in
   *) echo "Unsupported Linux architecture: $(uname -m)" >&2; exit 1 ;;
 esac
 
-app_source="$(find "$project_root/src-tauri/target/release/bundle/appimage" -maxdepth 1 -type f -name '*.AppImage' -print -quit)"
-if [[ -z "$app_source" || ! -f "$app_source" ]]; then
-  echo "KRU AppImage is missing. Run npm run build:linux first." >&2
+appimage_dir="$project_root/src-tauri/target/release/bundle/appimage"
+mapfile -t app_sources < <(find "$appimage_dir" -maxdepth 1 -type f -name '*.AppImage' -print | sort)
+if [[ ${#app_sources[@]} -ne 1 ]]; then
+  echo "Expected exactly one freshly built KRU AppImage, found ${#app_sources[@]}. Remove stale bundle output and rebuild." >&2
+  exit 1
+fi
+app_source="${app_sources[0]}"
+if find "$project_root/renderer" "$project_root/browser-extension" "$project_root/src-tauri/src" "$project_root/src-tauri/icons" \
+  "$project_root/package.json" "$project_root/package-lock.json" "$project_root/src-tauri/Cargo.toml" \
+  "$project_root/src-tauri/Cargo.lock" "$project_root/src-tauri/tauri.conf.json" \
+  -type f -newer "$app_source" -print -quit | grep -q .; then
+  echo "KRU AppImage is older than its source. Run npm run build:linux again." >&2
   exit 1
 fi
 
@@ -38,9 +47,16 @@ rm -rf "$stage_root"
 mkdir -p "$package_root"
 cp "$app_source" "$package_root/KRU.AppImage"
 chmod +x "$package_root/KRU.AppImage"
-cp "$project_root/README.md" "$project_root/README.zh-CN.md" "$project_root/SECURITY.md" "$project_root/LICENSE" "$package_root/"
-mkdir -p "$package_root/.github/assets"
-cp "$project_root/.github/assets/kru-hero.svg" "$project_root/.github/assets/kru-flow.svg" "$package_root/.github/assets/"
+cat > "$package_root/kru" <<'EOF'
+#!/bin/sh
+set -eu
+package_dir="$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)"
+export APPIMAGE_EXTRACT_AND_RUN=1
+export KRU_LAUNCHER_PATH="$package_dir/kru"
+exec "$package_dir/KRU.AppImage" "$@"
+EOF
+chmod +x "$package_root/kru"
+cp "$project_root/README.md" "$project_root/LICENSE" "$package_root/"
 cp -R "$project_root/browser-extension" "$package_root/browser-extension"
 
 (

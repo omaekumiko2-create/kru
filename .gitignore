@@ -3,9 +3,13 @@
 /src-tauri/target-*/
 /src-tauri/gen/
 /dist/
+/.tmp/
 .DS_Store
 *.p12
 *.p8
 AuthKey_*.p8
 certificate-base64.txt
 *.mvault
+test-fixtures/vps/*.result.json
+/test-fixtures/desktop-sink/bin/
+/test-fixtures/desktop-sink/obj/

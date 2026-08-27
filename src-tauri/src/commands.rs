@@ -2,22 +2,21 @@ use crate::{
     agent_registry::{AgentActionResult, AgentClientStatus, AgentRegistry},
     backup,
     browser::BrowserBridge,
-    executor, mcp,
+    executor,
+    gui_instance::GuiInstance,
+    mcp,
     model::{
-        AppState, ApprovalRequest, ConnectionInput, ImportSummary, NewActivity, OwnerEditorDraft,
-        OwnerLockState, OwnerSecretView, PublicConnection, Settings,
+        AppState, ConnectionInput, ImportSummary, NewActivity, OwnerEditorDraft, OwnerLockState,
+        OwnerSecretView, PublicConnection, SettingsPatch,
     },
     vault::Vault,
 };
 use anyhow::{Context, Result};
+use serde::Serialize;
 use std::{
-    collections::HashSet,
     path::PathBuf,
     process::Command,
-    sync::{
-        Arc,
-        atomic::{AtomicBool, Ordering},
-    },
+    sync::atomic::{AtomicBool, Ordering},
     time::{Duration, Instant},
 };
 use tauri::{
@@ -26,23 +25,33 @@ use tauri::{
     tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent},
 };
 use tauri_plugin_clipboard_manager::ClipboardExt;
-use tauri_plugin_dialog::{DialogExt, MessageDialogButtons, MessageDialogKind};
+use tauri_plugin_dialog::DialogExt;
 use tauri_plugin_opener::OpenerExt;
 use tokio::sync::Mutex;
 use uuid::Uuid;
 
 pub struct AppRuntime {
+    _gui_instance: GuiInstance,
     vault: Vault,
     executable: String,
     browser: BrowserBridge,
     pending_private_key: Mutex<Option<PathBuf>>,
+    pending_legacy_backup: Mutex<Option<PathBuf>>,
     owner_session: Mutex<OwnerSession>,
     agent_registry: AgentRegistry,
+    tray_available: AtomicBool,
 }
 
 #[derive(Default)]
 struct OwnerSession {
     unlocked_until: Option<Instant>,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct BackupImportResult {
+    summary: Option<ImportSummary>,
+    legacy_password_required: bool,
 }
 
 const OWNER_SESSION_DURATION: Duration = Duration::from_secs(10 * 60);
@@ -55,6 +64,14 @@ async fn owner_lock_state(runtime: &AppRuntime) -> Result<OwnerLockState, String
         .owner_pin_configured()
         .map_err(command_error)?;
     let mut session = runtime.owner_session.lock().await;
+    if !pin_configured {
+        session.unlocked_until = None;
+        return Ok(OwnerLockState {
+            pin_configured,
+            unlocked: true,
+            expires_in_seconds: 0,
+        });
+    }
     let expires_in_seconds = session
         .unlocked_until
         .and_then(|until| until.checked_duration_since(Instant::now()))
@@ -113,6 +130,14 @@ async fn owner_set_pin(
 ) -> Result<OwnerLockState, String> {
     runtime.vault.set_owner_pin(&pin).map_err(command_error)?;
     extend_owner_session(&runtime).await;
+    owner_lock_state(&runtime).await
+}
+
+#[tauri::command]
+async fn owner_disable_pin(runtime: State<'_, AppRuntime>) -> Result<OwnerLockState, String> {
+    require_owner_unlocked(&runtime).await?;
+    runtime.vault.disable_owner_pin().map_err(command_error)?;
+    runtime.owner_session.lock().await.unlocked_until = None;
     owner_lock_state(&runtime).await
 }
 
@@ -341,11 +366,11 @@ async fn reset_ssh_fingerprint(
 async fn update_settings(
     app: AppHandle,
     runtime: State<'_, AppRuntime>,
-    settings: Settings,
-) -> Result<Settings, String> {
+    patch: SettingsPatch,
+) -> Result<crate::model::Settings, String> {
     let settings = runtime
         .vault
-        .update_settings(settings)
+        .update_settings_patch(patch)
         .map_err(command_error)?;
     runtime.browser.sync().await;
     emit_changed(&app);
@@ -353,31 +378,40 @@ async fn update_settings(
 }
 
 #[tauri::command]
+fn system_integration_status(
+    runtime: State<'_, AppRuntime>,
+) -> Result<crate::system_integration::SystemIntegrationState, String> {
+    crate::system_integration::status(PathBuf::from(&runtime.executable).as_path())
+        .map_err(command_error)
+}
+
+#[tauri::command]
+fn set_desktop_shortcut(
+    runtime: State<'_, AppRuntime>,
+    enabled: bool,
+) -> Result<crate::system_integration::SystemIntegrationState, String> {
+    crate::system_integration::set_desktop_shortcut(
+        PathBuf::from(&runtime.executable).as_path(),
+        enabled,
+    )
+    .map_err(command_error)
+}
+
+#[tauri::command]
+fn set_launch_at_login(
+    runtime: State<'_, AppRuntime>,
+    enabled: bool,
+) -> Result<crate::system_integration::SystemIntegrationState, String> {
+    crate::system_integration::set_launch_at_login(
+        PathBuf::from(&runtime.executable).as_path(),
+        enabled,
+    )
+    .map_err(command_error)
+}
+
+#[tauri::command]
 async fn clear_activities(app: AppHandle, runtime: State<'_, AppRuntime>) -> Result<(), String> {
     runtime.vault.clear_activities().map_err(command_error)?;
-    emit_changed(&app);
-    Ok(())
-}
-
-#[tauri::command]
-async fn approval_requests(runtime: State<'_, AppRuntime>) -> Result<Vec<ApprovalRequest>, String> {
-    require_owner_unlocked(&runtime).await?;
-    runtime.vault.pending_approvals().map_err(command_error)
-}
-
-#[tauri::command]
-async fn resolve_approval(
-    app: AppHandle,
-    runtime: State<'_, AppRuntime>,
-    id: Uuid,
-    approved: bool,
-) -> Result<(), String> {
-    require_owner_unlocked(&runtime).await?;
-    extend_owner_session(&runtime).await;
-    runtime
-        .vault
-        .resolve_approval(id, approved)
-        .map_err(command_error)?;
     emit_changed(&app);
     Ok(())
 }
@@ -471,12 +505,13 @@ async fn quick_pair_browser(
     runtime: State<'_, AppRuntime>,
     port: u16,
 ) -> Result<String, String> {
-    let mut settings = runtime.vault.settings().map_err(command_error)?;
-    settings.browser_enabled = true;
-    settings.browser_port = port;
     runtime
         .vault
-        .update_settings(settings)
+        .update_settings_patch(SettingsPatch {
+            browser_enabled: Some(true),
+            browser_port: Some(port),
+            ..SettingsPatch::default()
+        })
         .map_err(command_error)?;
     runtime.browser.sync().await;
     runtime
@@ -530,7 +565,7 @@ fn browser_extension_path(app: &AppHandle) -> Result<PathBuf, String> {
         .ok()
         .map(|path| path.join("browser-extension"))
         .filter(|path| path.is_dir());
-    let executable = std::env::current_exe().map_err(command_error)?;
+    let executable = mcp::launcher_executable().map_err(command_error)?;
     let portable = executable
         .parent()
         .map(|path| path.join("browser-extension"))
@@ -539,8 +574,8 @@ fn browser_extension_path(app: &AppHandle) -> Result<PathBuf, String> {
         .parent()
         .map(|path| path.join("browser-extension"))
         .filter(|path| path.is_dir());
-    let path = bundled
-        .or(portable)
+    let path = portable
+        .or(bundled)
         .or(development)
         .ok_or_else(|| "未找到 browser-extension 目录，请使用完整的便携 ZIP".to_owned())?;
     Ok(path)
@@ -604,7 +639,6 @@ fn open_chromium_extensions_page() -> bool {
 async fn export_backup(
     app: AppHandle,
     runtime: State<'_, AppRuntime>,
-    password: String,
 ) -> Result<Option<String>, String> {
     let selected = app
         .dialog()
@@ -616,7 +650,7 @@ async fn export_backup(
         return Ok(None);
     };
     let path = path.into_path().map_err(command_error)?;
-    backup::export_to_file(&runtime.vault, &path, &password).map_err(command_error)?;
+    backup::export_to_file(&runtime.vault, &path).map_err(command_error)?;
     Ok(Some(path.to_string_lossy().into_owned()))
 }
 
@@ -624,8 +658,8 @@ async fn export_backup(
 async fn import_backup(
     app: AppHandle,
     runtime: State<'_, AppRuntime>,
-    password: String,
-) -> Result<Option<ImportSummary>, String> {
+) -> Result<Option<BackupImportResult>, String> {
+    *runtime.pending_legacy_backup.lock().await = None;
     let selected = app
         .dialog()
         .file()
@@ -635,10 +669,41 @@ async fn import_backup(
         return Ok(None);
     };
     let path = path.into_path().map_err(command_error)?;
-    let summary =
-        backup::import_from_file(&runtime.vault, path, &password).map_err(command_error)?;
+    if backup::backup_requires_password(&path).map_err(command_error)? {
+        *runtime.pending_legacy_backup.lock().await = Some(path);
+        return Ok(Some(BackupImportResult {
+            summary: None,
+            legacy_password_required: true,
+        }));
+    }
+    let summary = backup::import_from_file(&runtime.vault, path).map_err(command_error)?;
     emit_changed(&app);
-    Ok(Some(summary))
+    Ok(Some(BackupImportResult {
+        summary: Some(summary),
+        legacy_password_required: false,
+    }))
+}
+
+#[tauri::command]
+async fn import_legacy_backup(
+    app: AppHandle,
+    runtime: State<'_, AppRuntime>,
+    password: String,
+) -> Result<ImportSummary, String> {
+    let path = runtime
+        .pending_legacy_backup
+        .lock()
+        .await
+        .clone()
+        .ok_or_else(|| "请重新选择旧版备份文件".to_owned())?;
+    let summary =
+        backup::import_legacy_from_file(&runtime.vault, &path, &password).map_err(command_error)?;
+    let mut pending = runtime.pending_legacy_backup.lock().await;
+    if pending.as_ref() == Some(&path) {
+        *pending = None;
+    }
+    emit_changed(&app);
+    Ok(summary)
 }
 
 #[tauri::command]
@@ -657,15 +722,20 @@ async fn window_action(
     match action.as_str() {
         "minimize" => {
             runtime.owner_session.lock().await.unlocked_until = None;
-            window.hide().map_err(command_error)
+            window.minimize().map_err(command_error)
         }
         "close" => {
+            let tray_available = runtime.tray_available.load(Ordering::Acquire);
+            if !tray_available {
+                window.app_handle().exit(0);
+                return Ok(());
+            }
             let close_behavior = runtime
                 .vault
                 .settings()
                 .map_err(command_error)?
                 .close_behavior;
-            if close_behavior == "exit" {
+            if !should_hide_on_close(&close_behavior, tray_available) {
                 window.app_handle().exit(0);
                 Ok(())
             } else {
@@ -673,12 +743,12 @@ async fn window_action(
                 window.hide().map_err(command_error)
             }
         }
-        "attention" => window
-            .request_user_attention(Some(tauri::UserAttentionType::Critical))
-            .map_err(command_error),
-        "attention-clear" => window.request_user_attention(None).map_err(command_error),
         _ => Err("未知窗口操作".to_owned()),
     }
+}
+
+fn should_hide_on_close(close_behavior: &str, tray_available: bool) -> bool {
+    tray_available && !close_behavior.eq_ignore_ascii_case("exit")
 }
 
 fn show_main_window(app: &AppHandle) {
@@ -711,6 +781,7 @@ fn install_tray(app: &tauri::App) -> Result<()> {
             } else if event.id() == "tray-lock" {
                 let handle = app.clone();
                 tauri::async_runtime::spawn(async move {
+                    let pin_configured = handle.state::<AppRuntime>().vault.owner_pin_configured();
                     handle
                         .state::<AppRuntime>()
                         .owner_session
@@ -718,8 +789,16 @@ fn install_tray(app: &tauri::App) -> Result<()> {
                         .await
                         .unlocked_until = None;
                     show_main_window(&handle);
+                    if matches!(pin_configured, Ok(false)) {
+                        let _ = handle.emit("pin-setup-requested", ());
+                    }
                 });
             } else if event.id() == "tray-quit" {
+                if let Err(error) =
+                    crate::runtime_epoch::invalidate(app.state::<AppRuntime>().vault.data_dir())
+                {
+                    eprintln!("KRU: failed to stop MCP sessions: {error:#}");
+                }
                 app.exit(0);
             }
         })
@@ -737,74 +816,6 @@ fn install_tray(app: &tauri::App) -> Result<()> {
         })
         .build(app)?;
     Ok(())
-}
-
-fn spawn_approval_popup_watcher(app: AppHandle) {
-    tauri::async_runtime::spawn(async move {
-        let mut notified = HashSet::new();
-        let dialog_open = Arc::new(AtomicBool::new(false));
-
-        loop {
-            tokio::time::sleep(Duration::from_millis(750)).await;
-            let runtime = app.state::<AppRuntime>();
-            let Ok(settings) = runtime.vault.settings() else {
-                continue;
-            };
-            if !settings.approval_mode || !settings.system_approval_popup {
-                notified.clear();
-                continue;
-            }
-
-            let Ok(requests) = runtime.vault.pending_approvals() else {
-                continue;
-            };
-            let active_ids: HashSet<_> = requests.iter().map(|request| request.id).collect();
-            notified.retain(|id| active_ids.contains(id));
-            if dialog_open.load(Ordering::Acquire) {
-                continue;
-            }
-            let Some(request) = requests
-                .iter()
-                .find(|request| !notified.contains(&request.id))
-            else {
-                continue;
-            };
-
-            notified.insert(request.id);
-            dialog_open.store(true, Ordering::Release);
-            let english = settings.language == "en";
-            let title = if english {
-                "KRU · APPROVAL REQUIRED"
-            } else {
-                "KRU · 等待审核"
-            };
-            let body = if english {
-                format!(
-                    "{} requests access to “{}”.\nAction: {}\nReview this request inside KRU.",
-                    request.source, request.item_name, request.action
-                )
-            } else {
-                format!(
-                    "{} 请求使用「{}」。\n动作：{}\n请在 KRU 内完成审核。",
-                    request.source, request.item_name, request.action
-                )
-            };
-            let open_label = if english { "OPEN KRU" } else { "打开 KRU" };
-            let callback_app = app.clone();
-            let callback_open = dialog_open.clone();
-            app.dialog()
-                .message(body)
-                .title(title)
-                .kind(MessageDialogKind::Warning)
-                .buttons(MessageDialogButtons::OkCustom(open_label.to_owned()))
-                .show(move |open| {
-                    callback_open.store(false, Ordering::Release);
-                    if open {
-                        show_main_window(&callback_app);
-                    }
-                });
-        }
-    });
 }
 
 fn app_data_dir() -> Result<PathBuf> {
@@ -839,25 +850,30 @@ fn request_square_corners(_window: &WebviewWindow) -> Result<()> {
 }
 
 pub fn run_gui() -> Result<()> {
+    let data_dir = app_data_dir()?;
+    let mut gui_instance = GuiInstance::acquire(&data_dir)?;
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_clipboard_manager::init())
         .plugin(tauri_plugin_opener::init())
-        .setup(|app| {
-            let vault = Vault::open(app_data_dir()?)?;
-            let executable = std::env::current_exe()
-                .context("无法确定可执行文件路径")?
-                .to_string_lossy()
-                .into_owned();
+        .setup(move |app| {
+            let exit_handle = app.handle().clone();
+            gui_instance.listen_for_takeover(move || exit_handle.exit(0))?;
+            let vault = Vault::open(data_dir.clone())?;
+            let executable = mcp::launcher_executable()?.to_string_lossy().into_owned();
+            crate::runtime_epoch::activate_build(&data_dir, PathBuf::from(&executable).as_path())?;
             let browser = BrowserBridge::new(vault.clone());
             let agent_registry = AgentRegistry::new(PathBuf::from(&executable))?;
             app.manage(AppRuntime {
+                _gui_instance: gui_instance,
                 vault,
                 executable,
                 browser,
                 pending_private_key: Mutex::new(None),
+                pending_legacy_backup: Mutex::new(None),
                 owner_session: Mutex::new(OwnerSession::default()),
                 agent_registry,
+                tray_available: AtomicBool::new(false),
             });
 
             let window = app.get_webview_window("main").context("找不到主窗口")?;
@@ -868,9 +884,17 @@ pub fn run_gui() -> Result<()> {
             window.set_resizable(false)?;
             window.set_maximizable(false)?;
             request_square_corners(&window)?;
-            install_tray(app)?;
-            spawn_approval_popup_watcher(app.handle().clone());
-
+            match install_tray(app) {
+                Ok(()) => app
+                    .state::<AppRuntime>()
+                    .tray_available
+                    .store(true, Ordering::Release),
+                Err(error) => {
+                    eprintln!(
+                        "KRU: system tray unavailable; closing the window will exit: {error:#}"
+                    )
+                }
+            }
             {
                 let handle = app.handle().clone();
                 tauri::async_runtime::spawn(async move {
@@ -887,11 +911,40 @@ pub fn run_gui() -> Result<()> {
                     WINDOW_LOGICAL_HEIGHT,
                 ));
             }
+            if let tauri::WindowEvent::CloseRequested { api, .. } = event {
+                let runtime = window.state::<AppRuntime>();
+                let close_behavior = runtime
+                    .vault
+                    .settings()
+                    .map(|settings| settings.close_behavior)
+                    .unwrap_or_else(|_| "exit".to_owned());
+                if should_hide_on_close(
+                    &close_behavior,
+                    runtime.tray_available.load(Ordering::Acquire),
+                ) {
+                    api.prevent_close();
+                    let app = window.app_handle().clone();
+                    let window = window.clone();
+                    tauri::async_runtime::spawn(async move {
+                        app.state::<AppRuntime>()
+                            .owner_session
+                            .lock()
+                            .await
+                            .unlocked_until = None;
+                        let _ = window.hide();
+                    });
+                } else if let Err(error) =
+                    crate::runtime_epoch::invalidate(runtime.vault.data_dir())
+                {
+                    eprintln!("KRU: failed to stop MCP sessions: {error:#}");
+                }
+            }
         })
         .invoke_handler(tauri::generate_handler![
             get_state,
             owner_status,
             owner_set_pin,
+            owner_disable_pin,
             owner_unlock,
             owner_touch,
             owner_lock,
@@ -906,9 +959,10 @@ pub fn run_gui() -> Result<()> {
             test_connection,
             reset_ssh_fingerprint,
             update_settings,
+            system_integration_status,
+            set_desktop_shortcut,
+            set_launch_at_login,
             clear_activities,
-            approval_requests,
-            resolve_approval,
             copy_mcp_config,
             agent_mcp_status,
             agent_mcp_register,
@@ -921,10 +975,23 @@ pub fn run_gui() -> Result<()> {
             open_browser_extension_folder,
             export_backup,
             import_backup,
+            import_legacy_backup,
             open_data_folder,
             window_action,
         ])
         .run(tauri::generate_context!())
         .context("KRU GUI 启动失败")?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::should_hide_on_close;
+
+    #[test]
+    fn close_only_hides_when_a_tray_entry_exists() {
+        assert!(should_hide_on_close("tray", true));
+        assert!(!should_hide_on_close("tray", false));
+        assert!(!should_hide_on_close("exit", true));
+    }
 }

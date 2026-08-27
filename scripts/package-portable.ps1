@@ -44,12 +44,7 @@ if (Test-Path -LiteralPath $stageRoot) {
 New-Item -ItemType Directory -Path $packageRoot -Force | Out-Null
 Copy-Item -LiteralPath $releaseExe -Destination (Join-Path $packageRoot "kru.exe")
 Copy-Item -LiteralPath (Join-Path $projectRoot "README.md") -Destination $packageRoot
-Copy-Item -LiteralPath (Join-Path $projectRoot "README.zh-CN.md") -Destination $packageRoot
-Copy-Item -LiteralPath (Join-Path $projectRoot "SECURITY.md") -Destination $packageRoot
 Copy-Item -LiteralPath (Join-Path $projectRoot "LICENSE") -Destination $packageRoot
-New-Item -ItemType Directory -Path (Join-Path $packageRoot ".github\assets") -Force | Out-Null
-Copy-Item -LiteralPath (Join-Path $projectRoot ".github\assets\kru-hero.svg") -Destination (Join-Path $packageRoot ".github\assets")
-Copy-Item -LiteralPath (Join-Path $projectRoot ".github\assets\kru-flow.svg") -Destination (Join-Path $packageRoot ".github\assets")
 Copy-Item -LiteralPath (Join-Path $projectRoot "browser-extension") -Destination $packageRoot -Recurse
 
 $checksums = Get-ChildItem -LiteralPath $packageRoot -Recurse -File |

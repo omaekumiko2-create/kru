@@ -1,8 +1,15 @@
 {
   "manifest_version": 3,
+  "minimum_chrome_version": "116",
   "name": "KRU Browser Bridge",
   "version": "0.9.0",
   "description": "Writes a selected local KRU secret into the focused web control.",
+  "icons": {
+    "16": "icons/16x16.png",
+    "32": "icons/32x32.png",
+    "48": "icons/48x48.png",
+    "128": "icons/128x128.png"
+  },
   "permissions": ["scripting", "storage", "tabs"],
   "host_permissions": ["http://*/*", "https://*/*"],
   "content_scripts": [{
@@ -20,6 +27,10 @@
   },
   "action": {
     "default_title": "KRU",
-    "default_popup": "popup.html"
+    "default_popup": "popup.html",
+    "default_icon": {
+      "16": "icons/16x16.png",
+      "32": "icons/32x32.png"
+    }
   }
 }

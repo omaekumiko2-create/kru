@@ -2,7 +2,7 @@
 * { box-sizing: border-box; border-radius: 0 !important; }
 body { width: 292px; margin: 0; color: #232323; background: #c7c4c3; }
 header { height: 68px; display: flex; align-items: center; gap: 14px; padding: 12px 14px; background: #ece9e7; border-bottom: 1px solid #232323; }
-.mark { display: grid; place-items: center; width: 42px; height: 42px; color: #fff; background: #ed4a1a; font-weight: 700; }
+.mark { display: block; flex: 0 0 auto; width: 42px; height: 42px; }
 strong, small, label, button, footer { letter-spacing: .08em; }
 header strong, header small, .status-row strong, .status-row small { display: block; }
 small { margin-top: 3px; color: #5f5e5e; font-size: 9px; }

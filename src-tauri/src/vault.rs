@@ -2,9 +2,9 @@ use crate::{
     api_catalog,
     crypto::{MasterKey, create_owner_pin_verifier, verify_owner_pin},
     model::{
-        Activity, ApiAuthHeader, AppState, ApprovalRequest, ConnectionInput, ImportSummary,
-        ItemModule, McpState, NewActivity, OwnerEditorDraft, OwnerSecretField, OwnerSecretView,
-        PublicConnection, SecretBundle, SecretField, SecretProfile, SecurityState, Settings,
+        Activity, ApiAuthHeader, AppState, ConnectionInput, ImportSummary, ItemModule, McpState,
+        NewActivity, OwnerEditorDraft, OwnerSecretField, OwnerSecretView, PublicConnection,
+        SecretBundle, SecretField, SecretProfile, SecurityState, Settings, SettingsPatch,
         StoredConnection, StoredEditorDraft, VaultDocument, normalize_item_capabilities,
     },
 };
@@ -43,33 +43,44 @@ pub struct DecryptedConnection {
 impl Vault {
     pub fn open(data_dir: PathBuf) -> Result<Self> {
         fs::create_dir_all(&data_dir).context("无法创建保险库目录")?;
-        let vault_path = data_dir.join("vault.json");
-        let key = MasterKey::load_or_create(&data_dir, vault_path.exists())?;
-        let vault = Self {
-            inner: Arc::new(VaultInner {
-                lock_path: data_dir.join("vault.lock"),
-                data_dir,
-                vault_path,
-                key,
-            }),
-        };
+        let bootstrap = OpenOptions::new()
+            .create(true)
+            .read(true)
+            .write(true)
+            .open(data_dir.join("bootstrap.lock"))
+            .context("无法打开保险库启动锁")?;
+        FileExt::lock_exclusive(&bootstrap).context("无法锁定保险库启动过程")?;
 
-        if !vault.inner.vault_path.exists() {
-            let document = VaultDocument {
-                version: 7,
-                settings: Settings::default(),
-                browser_bridge_secret: None,
-                owner_pin: None,
-                connections: Vec::new(),
-                editor_drafts: Vec::new(),
-                activities: Vec::new(),
-                approvals: Vec::new(),
+        let result = (|| {
+            let vault_path = data_dir.join("vault.json");
+            let key = MasterKey::load_or_create(&data_dir, vault_path.exists())?;
+            let vault = Self {
+                inner: Arc::new(VaultInner {
+                    lock_path: data_dir.join("vault.lock"),
+                    data_dir,
+                    vault_path,
+                    key,
+                }),
             };
-            vault.with_exclusive_lock(|_| vault.write_document_unlocked(&document))?;
-        } else {
-            vault.migrate_to_v7()?;
-        }
-        Ok(vault)
+
+            if !vault.inner.vault_path.exists() {
+                let document = VaultDocument {
+                    version: 7,
+                    settings: Settings::default(),
+                    browser_bridge_secret: None,
+                    owner_pin: None,
+                    connections: Vec::new(),
+                    editor_drafts: Vec::new(),
+                    activities: Vec::new(),
+                };
+                vault.with_exclusive_lock(|_| vault.write_document_unlocked(&document))?;
+            } else {
+                vault.migrate_to_v7()?;
+            }
+            Ok(vault)
+        })();
+        let _ = FileExt::unlock(&bootstrap);
+        result
     }
 
     pub fn data_dir(&self) -> &Path {
@@ -83,10 +94,22 @@ impl Vault {
     fn migrate_to_v7(&self) -> Result<()> {
         self.with_exclusive_lock(|_| {
             let bytes = fs::read(&self.inner.vault_path).context("无法读取保险库")?;
+            let has_legacy_ssh_policy = bytes
+                .windows(b"\"securityMode\"".len())
+                .any(|window| window == b"\"securityMode\"")
+                || bytes
+                    .windows(b"\"allowedCommands\"".len())
+                    .any(|window| window == b"\"allowedCommands\"");
             let mut document: VaultDocument =
                 serde_json::from_slice(&bytes).context("保险库文件格式无效")?;
+            if document.version == 7 {
+                let repaired_names = repair_duplicate_item_names(&mut document.connections);
+                if has_legacy_ssh_policy || repaired_names {
+                    self.write_document_unlocked(&document)?;
+                }
+                return Ok(());
+            }
             let reset_legacy_fingerprints = match document.version {
-                7 => return Ok(()),
                 6 | 5 => false,
                 4 => true,
                 3 => true,
@@ -148,6 +171,7 @@ impl Vault {
                     connection.host_fingerprint_port = 0;
                 }
             }
+            repair_duplicate_item_names(&mut document.connections);
             document.version = 7;
             self.write_document_unlocked(&document)
         })
@@ -164,6 +188,13 @@ impl Vault {
                 bail!("PIN 已设置");
             }
             document.owner_pin = Some(verifier);
+            Ok(())
+        })
+    }
+
+    pub fn disable_owner_pin(&self) -> Result<()> {
+        self.update_document(|document| {
+            document.owner_pin = None;
             Ok(())
         })
     }
@@ -268,13 +299,41 @@ impl Vault {
             next.browser_paired = document.settings.browser_paired;
             // Agent onboarding is changed only by its dedicated command.
             next.agent_mcp_onboarding_version = document.settings.agent_mcp_onboarding_version;
-            if !next.approval_mode {
-                document.approvals.clear();
-            }
             document.settings = next.clone();
             Ok(())
         })?;
         Ok(next)
+    }
+
+    pub fn update_settings_patch(&self, patch: SettingsPatch) -> Result<Settings> {
+        self.update_document_with_result(|document| {
+            let mut next = document.settings.clone();
+            if let Some(language) = patch.language {
+                next.language = if language.eq_ignore_ascii_case("en") {
+                    "en".to_owned()
+                } else {
+                    "zh".to_owned()
+                };
+            }
+            if let Some(close_behavior) = patch.close_behavior {
+                next.close_behavior = if close_behavior.eq_ignore_ascii_case("exit") {
+                    "exit".to_owned()
+                } else {
+                    "tray".to_owned()
+                };
+            }
+            if let Some(browser_enabled) = patch.browser_enabled {
+                next.browser_enabled = browser_enabled;
+            }
+            if let Some(browser_port) = patch.browser_port {
+                if browser_port < 1024 {
+                    bail!("本地端口必须在 1024–65535 之间");
+                }
+                next.browser_port = browser_port;
+            }
+            document.settings = next.clone();
+            Ok(next)
+        })
     }
 
     pub fn complete_agent_mcp_onboarding(&self) -> Result<()> {
@@ -315,14 +374,22 @@ impl Vault {
     }
 
     pub fn list_connections(&self) -> Result<Vec<PublicConnection>> {
+        self.list_decrypted_connections().map(|connections| {
+            connections
+                .into_iter()
+                .map(|connection| connection.stored.public(Some(&connection.secrets)))
+                .collect()
+        })
+    }
+
+    pub fn list_decrypted_connections(&self) -> Result<Vec<DecryptedConnection>> {
         let document = self.read_document()?;
         document
             .connections
-            .iter()
-            .map(|connection| {
-                let secrets: SecretBundle =
-                    self.inner.key.decrypt(&connection.encrypted_secrets)?;
-                Ok(connection.public(Some(&secrets)))
+            .into_iter()
+            .map(|stored| {
+                let secrets = self.inner.key.decrypt(&stored.encrypted_secrets)?;
+                Ok(DecryptedConnection { stored, secrets })
             })
             .collect()
     }
@@ -534,6 +601,16 @@ impl Vault {
             if input.name.is_empty() {
                 bail!("项目名称不能为空");
             }
+            if document
+                .connections
+                .iter()
+                .enumerate()
+                .any(|(index, item)| {
+                    Some(index) != existing_index && same_item_name(&item.name, &input.name)
+                })
+            {
+                bail!("项目名称已存在，请使用其他名称");
+            }
             if input.modules.is_empty() {
                 bail!("项目至少需要一个模块");
             }
@@ -641,103 +718,24 @@ impl Vault {
         })
     }
 
-    pub fn create_approval_request(
-        &self,
-        item_id: Uuid,
-        source: &str,
-        action: &str,
-        detail: &str,
-    ) -> Result<Option<ApprovalRequest>> {
-        if !self.settings()?.approval_mode {
-            return Ok(None);
-        }
-        self.update_document_with_result(|document| {
-            if !document.settings.approval_mode {
-                return Ok(None);
-            }
-            let item_name = document
-                .connections
-                .iter()
-                .find(|connection| connection.id == item_id)
-                .map(|connection| connection.name.clone())
-                .context("找不到该项目")?;
-            purge_old_approvals(&mut document.approvals);
-            if document
-                .approvals
-                .iter()
-                .filter(|request| request.status == "pending")
-                .count()
-                >= 20
-            {
-                bail!("待审核请求过多，请先在 KRU 中处理");
-            }
-            let request = ApprovalRequest {
-                id: Uuid::new_v4(),
-                created_at: Utc::now().to_rfc3339(),
-                status: "pending".to_owned(),
-                source: clean_text(source, 40),
-                item_id,
-                item_name: clean_text(&item_name, 80),
-                action: clean_text(action, 80),
-                detail: clean_text(detail, 240),
-            };
-            document.approvals.push(request.clone());
-            Ok(Some(request))
-        })
-    }
-
-    pub fn pending_approvals(&self) -> Result<Vec<ApprovalRequest>> {
-        let mut requests = self
-            .read_document()?
-            .approvals
-            .into_iter()
-            .filter(|request| request.status == "pending" && approval_is_recent(request))
-            .collect::<Vec<_>>();
-        requests.sort_by(|left, right| left.created_at.cmp(&right.created_at));
-        Ok(requests)
-    }
-
-    pub fn resolve_approval(&self, id: Uuid, approved: bool) -> Result<()> {
-        self.update_document(|document| {
-            let request = document
-                .approvals
-                .iter_mut()
-                .find(|request| request.id == id && request.status == "pending")
-                .context("审核请求已结束或不存在")?;
-            if !approval_is_recent(request) {
-                request.status = "expired".to_owned();
-                bail!("审核请求已超时");
-            }
-            request.status = if approved { "approved" } else { "denied" }.to_owned();
-            Ok(())
-        })
-    }
-
-    pub fn approval_status(&self, id: Uuid) -> Result<Option<String>> {
-        Ok(self
-            .read_document()?
-            .approvals
-            .into_iter()
-            .find(|request| request.id == id)
-            .map(|request| request.status))
-    }
-
-    pub fn remove_approval(&self, id: Uuid) -> Result<()> {
-        self.update_document(|document| {
-            document.approvals.retain(|request| request.id != id);
-            Ok(())
-        })
-    }
-
     pub fn app_state(
         &self,
         executable: &str,
         browser_bridge: crate::model::BrowserBridgeState,
     ) -> Result<AppState> {
-        let settings = self.settings()?;
+        let document = self.read_document()?;
+        let connections = document
+            .connections
+            .iter()
+            .map(|connection| {
+                let secrets: SecretBundle =
+                    self.inner.key.decrypt(&connection.encrypted_secrets)?;
+                Ok(connection.public(Some(&secrets)))
+            })
+            .collect::<Result<Vec<_>>>()?;
         Ok(AppState {
-            connections: self.list_connections()?,
-            activities: self.activities()?,
+            connections,
+            activities: document.activities.clone(),
             mcp: McpState {
                 status: "ready".to_owned(),
                 error: String::new(),
@@ -749,7 +747,7 @@ impl Vault {
                 encrypted: true,
                 storage: self.storage_label().to_owned(),
             },
-            settings,
+            settings: document.settings.clone(),
         })
     }
 
@@ -775,21 +773,52 @@ impl Vault {
         self.update_document_with_result(|document| {
             let mut summary = ImportSummary {
                 added: 0,
-                updated: 0,
+                merged: 0,
             };
-            for (public, secrets) in &imported {
-                let stored = stored_from_portable(public, secrets, &self.inner.key)?;
-                if let Some(index) = document
+            for (public, secrets) in imported {
+                let mut stored = stored_from_portable(&public, &secrets, &self.inner.key)?;
+                let imported_secrets: SecretBundle =
+                    self.inner.key.decrypt(&stored.encrypted_secrets)?;
+                let requested_name = clean_text(&stored.name, 80);
+                stored.name = if requested_name.is_empty() {
+                    "导入项目".to_owned()
+                } else {
+                    requested_name
+                };
+
+                let has_requested_name = document
                     .connections
                     .iter()
-                    .position(|item| item.id == public.id)
-                {
-                    document.connections[index] = stored;
-                    summary.updated += 1;
-                } else {
-                    document.connections.push(stored);
-                    summary.added += 1;
+                    .any(|item| same_item_name(&item.name, &stored.name));
+                let mut duplicate = false;
+                for existing in document.connections.iter().filter(|item| {
+                    same_item_name(&item.name, &stored.name)
+                        || (has_requested_name && import_name_in_family(&item.name, &stored.name))
+                }) {
+                    let existing_secrets: SecretBundle =
+                        self.inner.key.decrypt(&existing.encrypted_secrets)?;
+                    if same_portable_content(
+                        existing,
+                        &existing_secrets,
+                        &stored,
+                        &imported_secrets,
+                    ) {
+                        duplicate = true;
+                        break;
+                    }
                 }
+
+                if duplicate {
+                    summary.merged += 1;
+                    continue;
+                }
+
+                stored.name = unique_import_name(&document.connections, &stored.name);
+                if document.connections.iter().any(|item| item.id == stored.id) {
+                    stored.id = Uuid::new_v4();
+                }
+                document.connections.push(stored);
+                summary.added += 1;
             }
             document.activities.insert(
                 0,
@@ -799,7 +828,10 @@ impl Vault {
                     status: "success".to_owned(),
                     source: "应用".to_owned(),
                     connection_name: "便携备份".to_owned(),
-                    action: format!("导入备份：新增 {}，更新 {}", summary.added, summary.updated),
+                    action: format!(
+                        "导入备份：新增 {}，合并重复 {}",
+                        summary.added, summary.merged
+                    ),
                     duration_ms: 0,
                     error: String::new(),
                 },
@@ -917,8 +949,6 @@ fn migrate_connection_to_v3(connection: &mut StoredConnection, key: &MasterKey) 
         connection.host_fingerprint.clear();
         connection.host_fingerprint_host.clear();
         connection.host_fingerprint_port = 0;
-        connection.security_mode.clear();
-        connection.allowed_commands.clear();
         connection.base_url.clear();
         connection.auth_header.clear();
         connection.allowed_methods.clear();
@@ -1393,11 +1423,6 @@ fn normalize_connection_v7(
         host_fingerprint,
         host_fingerprint_host,
         host_fingerprint_port,
-        security_mode: match input.security_mode.as_str() {
-            "diagnostic" | "restricted" | "unrestricted" => input.security_mode,
-            _ => "readonly".to_owned(),
-        },
-        allowed_commands: normalize_list(input.allowed_commands, 30, 180),
         base_url,
         auth_header: clean_text(&input.auth_header, 100),
         auth_location: clean_text(&input.auth_location, 20),
@@ -1471,8 +1496,6 @@ fn stored_from_portable(
         host_fingerprint: String::new(),
         host_fingerprint_host: String::new(),
         host_fingerprint_port: 0,
-        security_mode: public.security_mode.clone(),
-        allowed_commands: public.allowed_commands.clone(),
         base_url: public.base_url.clone(),
         auth_header: public.auth_header.clone(),
         auth_location: public.auth_location.clone(),
@@ -1504,6 +1527,97 @@ fn stored_from_portable(
     stored.encrypted_secrets = key.encrypt(&secrets)?;
     stored.kind.clear();
     Ok(stored)
+}
+
+fn same_portable_content(
+    left: &StoredConnection,
+    left_secrets: &SecretBundle,
+    right: &StoredConnection,
+    right_secrets: &SecretBundle,
+) -> bool {
+    if left.modules != right.modules {
+        return false;
+    }
+    for module in &left.modules {
+        let Some(name) = module.secret_name() else {
+            continue;
+        };
+        if left_secrets.get(name) != right_secrets.get(name) {
+            return false;
+        }
+    }
+    true
+}
+
+fn import_name_in_family(candidate: &str, requested: &str) -> bool {
+    let Some((candidate_base, candidate_index)) = split_numbered_import_name(candidate) else {
+        return false;
+    };
+    let (requested_base, requested_index) = split_numbered_import_name(requested)
+        .map(|(base, index)| (base, index + 1))
+        .unwrap_or((requested, 2));
+    same_item_name(candidate_base, requested_base) && candidate_index >= requested_index
+}
+
+fn split_numbered_import_name(name: &str) -> Option<(&str, usize)> {
+    let without_closing = name.strip_suffix(')')?;
+    let opening = without_closing.rfind('(')?;
+    let index = without_closing[opening + 1..].parse::<usize>().ok()?;
+    (index >= 2 && index < usize::MAX && opening > 0)
+        .then_some((&without_closing[..opening], index))
+}
+
+fn unique_import_name(connections: &[StoredConnection], requested: &str) -> String {
+    unique_item_name(requested, |candidate| {
+        connections
+            .iter()
+            .any(|item| same_item_name(&item.name, candidate))
+    })
+}
+
+fn repair_duplicate_item_names(connections: &mut [StoredConnection]) -> bool {
+    let mut changed = false;
+    let mut used = Vec::<String>::with_capacity(connections.len());
+    for connection in connections {
+        let cleaned = clean_text(&connection.name, 80);
+        let requested = if cleaned.is_empty() {
+            format!("ITEM-{}", &connection.id.simple().to_string()[..6]).to_ascii_uppercase()
+        } else {
+            cleaned
+        };
+        let unique = unique_item_name(&requested, |candidate| {
+            used.iter().any(|name| same_item_name(name, candidate))
+        });
+        if connection.name != unique {
+            connection.name = unique.clone();
+            changed = true;
+        }
+        used.push(unique);
+    }
+    changed
+}
+
+fn unique_item_name<F>(requested: &str, exists: F) -> String
+where
+    F: Fn(&str) -> bool,
+{
+    if !exists(requested) {
+        return requested.to_owned();
+    }
+    let (base, mut index) = split_numbered_import_name(requested)
+        .map(|(base, index)| (base, index + 1))
+        .unwrap_or((requested, 2));
+    loop {
+        let candidate = format!("{base}({index})");
+        if !exists(&candidate) {
+            return candidate;
+        }
+        index += 1;
+    }
+}
+
+fn same_item_name(left: &str, right: &str) -> bool {
+    left.trim().to_lowercase() == right.trim().to_lowercase()
 }
 
 fn empty_envelope() -> crate::model::SecretEnvelope {
@@ -1610,21 +1724,6 @@ fn clean_text(value: &str, max_chars: usize) -> String {
     value.trim().chars().take(max_chars).collect()
 }
 
-fn approval_is_recent(request: &ApprovalRequest) -> bool {
-    chrono::DateTime::parse_from_rfc3339(&request.created_at)
-        .map(|created| {
-            Utc::now()
-                .signed_duration_since(created.with_timezone(&Utc))
-                .num_seconds()
-                < 60
-        })
-        .unwrap_or(false)
-}
-
-fn purge_old_approvals(requests: &mut Vec<ApprovalRequest>) {
-    requests.retain(|request| approval_is_recent(request));
-}
-
 fn normalize_ssh_fingerprint(value: &str) -> Result<String> {
     let value = value.trim();
     if value.is_empty() {
@@ -1673,8 +1772,6 @@ mod tests {
             http_auth_type: "bearer".to_owned(),
             private_key_import_path: String::new(),
             host_fingerprint: String::new(),
-            security_mode: String::new(),
-            allowed_commands: Vec::new(),
             base_url: "https://api.example.test/v1/".to_owned(),
             auth_header: "X-API-Key".to_owned(),
             auth_location: "header".to_owned(),
@@ -1711,8 +1808,6 @@ mod tests {
             http_auth_type: String::new(),
             private_key_import_path: String::new(),
             host_fingerprint: String::new(),
-            security_mode: "diagnostic".to_owned(),
-            allowed_commands: vec![],
             base_url: String::new(),
             auth_header: String::new(),
             auth_location: String::new(),
@@ -1942,6 +2037,74 @@ mod tests {
     }
 
     #[test]
+    fn item_names_are_unique_ignoring_case_and_outer_whitespace() {
+        let directory = tempdir().unwrap();
+        let vault = Vault::open(directory.path().join("vault")).unwrap();
+        let saved = vault
+            .save_connection(api_input(None, "Production API", "first-token"))
+            .unwrap();
+
+        let duplicate = vault
+            .save_connection(api_input(None, "  production api  ", "second-token"))
+            .unwrap_err();
+        assert!(duplicate.to_string().contains("名称已存在"));
+
+        let renamed = vault
+            .save_connection(api_input(Some(saved.id), "PRODUCTION API", "first-token"))
+            .unwrap();
+        assert_eq!(renamed.name, "PRODUCTION API");
+    }
+
+    #[test]
+    fn opening_existing_v7_repairs_duplicate_item_names() {
+        let directory = tempdir().unwrap();
+        let vault_dir = directory.path().join("vault");
+        let vault = Vault::open(vault_dir.clone()).unwrap();
+        vault
+            .save_connection(api_input(None, "Production API", "first-token"))
+            .unwrap();
+
+        let mut document = vault.read_document().unwrap();
+        let mut duplicate = document.connections[0].clone();
+        duplicate.id = Uuid::new_v4();
+        duplicate.name = " production api ".to_owned();
+        document.connections.push(duplicate);
+        vault.write_document_unlocked(&document).unwrap();
+        drop(vault);
+
+        let reopened = Vault::open(vault_dir).unwrap();
+        let names = reopened
+            .list_connections()
+            .unwrap()
+            .into_iter()
+            .map(|item| item.name)
+            .collect::<Vec<_>>();
+        assert_eq!(names, ["Production API", "production api(2)"]);
+    }
+
+    #[test]
+    fn opening_existing_v7_removes_legacy_ssh_command_settings() {
+        let directory = tempdir().unwrap();
+        let vault_dir = directory.path().join("vault");
+        let vault = Vault::open(vault_dir.clone()).unwrap();
+        vault.save_connection(ssh_input(None)).unwrap();
+        let vault_path = vault_dir.join("vault.json");
+        let mut raw: serde_json::Value =
+            serde_json::from_slice(&fs::read(&vault_path).unwrap()).unwrap();
+        let connection = raw["connections"][0].as_object_mut().unwrap();
+        connection.insert("securityMode".into(), serde_json::json!("readonly"));
+        connection.insert("allowedCommands".into(), serde_json::json!(["hostname"]));
+        fs::write(&vault_path, serde_json::to_vec_pretty(&raw).unwrap()).unwrap();
+        drop(vault);
+
+        let reopened = Vault::open(vault_dir).unwrap();
+        assert_eq!(reopened.list_connections().unwrap().len(), 1);
+        let rewritten = fs::read_to_string(vault_path).unwrap();
+        assert!(!rewritten.contains("securityMode"));
+        assert!(!rewritten.contains("allowedCommands"));
+    }
+
+    #[test]
     fn removing_a_secret_module_deletes_its_encrypted_value() {
         let directory = tempdir().unwrap();
         let vault = Vault::open(directory.path().join("vault")).unwrap();
@@ -2024,55 +2187,48 @@ mod tests {
                 .map(|field| field.value.as_str()),
             Some("owner-token-marker-7721")
         );
+
+        vault.disable_owner_pin().unwrap();
+        assert!(!vault.owner_pin_configured().unwrap());
     }
 
     #[test]
-    fn approval_mode_gates_each_request_without_storing_secret_values() {
+    fn settings_patches_do_not_overwrite_unrelated_concurrent_changes() {
         let directory = tempdir().unwrap();
         let vault = Vault::open(directory.path().to_path_buf()).unwrap();
-        let saved = vault
-            .save_connection(api_input(None, "approval-item", "approval-secret-marker"))
-            .unwrap();
+        let barrier = std::sync::Arc::new(std::sync::Barrier::new(3));
 
-        assert!(
-            vault
-                .create_approval_request(saved.id, "MCP · CODEX", "发送 API 请求", "GET /v1/me")
-                .unwrap()
-                .is_none()
-        );
+        let language_vault = vault.clone();
+        let language_barrier = barrier.clone();
+        let language = std::thread::spawn(move || {
+            language_barrier.wait();
+            language_vault
+                .update_settings_patch(SettingsPatch {
+                    language: Some("en".to_owned()),
+                    ..SettingsPatch::default()
+                })
+                .unwrap();
+        });
 
-        let mut settings = vault.settings().unwrap();
-        settings.approval_mode = true;
-        vault.update_settings(settings).unwrap();
-        let request = vault
-            .create_approval_request(saved.id, "MCP · CODEX", "发送 API 请求", "GET /v1/me")
-            .unwrap()
-            .unwrap();
-        let pending = vault.pending_approvals().unwrap();
-        assert_eq!(pending.len(), 1);
-        assert_eq!(pending[0].source, "MCP · CODEX");
-        assert!(
-            !serde_json::to_string(&pending)
-                .unwrap()
-                .contains("approval-secret-marker")
-        );
+        let browser_vault = vault.clone();
+        let browser_barrier = barrier.clone();
+        let browser = std::thread::spawn(move || {
+            browser_barrier.wait();
+            browser_vault
+                .update_settings_patch(SettingsPatch {
+                    browser_enabled: Some(true),
+                    ..SettingsPatch::default()
+                })
+                .unwrap();
+        });
 
-        vault.resolve_approval(request.id, true).unwrap();
-        assert_eq!(
-            vault.approval_status(request.id).unwrap().as_deref(),
-            Some("approved")
-        );
-        vault.remove_approval(request.id).unwrap();
-        assert!(vault.approval_status(request.id).unwrap().is_none());
+        barrier.wait();
+        language.join().unwrap();
+        browser.join().unwrap();
 
-        let request = vault
-            .create_approval_request(saved.id, "MCP · CODEX", "填写秘密", "browser · password")
-            .unwrap()
-            .unwrap();
-        let mut settings = vault.settings().unwrap();
-        settings.approval_mode = false;
-        vault.update_settings(settings).unwrap();
-        assert!(vault.approval_status(request.id).unwrap().is_none());
+        let settings = vault.settings().unwrap();
+        assert_eq!(settings.language, "en");
+        assert!(settings.browser_enabled);
     }
 
     #[test]
@@ -2097,6 +2253,44 @@ mod tests {
             handle.join().unwrap();
         }
         assert_eq!(vault.list_connections().unwrap().len(), 4);
+    }
+
+    #[test]
+    fn concurrent_first_open_uses_one_initialized_vault() {
+        let directory = tempdir().unwrap();
+        let vault_dir = Arc::new(directory.path().join("vault"));
+        let barrier = Arc::new(std::sync::Barrier::new(6));
+        let handles = (0..6)
+            .map(|index| {
+                let vault_dir = vault_dir.clone();
+                let barrier = barrier.clone();
+                std::thread::spawn(move || {
+                    barrier.wait();
+                    let vault = Vault::open((*vault_dir).clone()).unwrap();
+                    vault
+                        .save_connection(api_input(
+                            None,
+                            &format!("first-open-{index}"),
+                            &format!("first-open-secret-{index}"),
+                        ))
+                        .unwrap();
+                })
+            })
+            .collect::<Vec<_>>();
+        for handle in handles {
+            handle.join().unwrap();
+        }
+
+        let reopened = Vault::open((*vault_dir).clone()).unwrap();
+        let connections = reopened.list_decrypted_connections().unwrap();
+        assert_eq!(connections.len(), 6);
+        for index in 0..6 {
+            assert!(connections.iter().any(|connection| {
+                connection.stored.name == format!("first-open-{index}")
+                    && connection.secrets.token.as_deref()
+                        == Some(format!("first-open-secret-{index}").as_str())
+            }));
+        }
     }
 
     #[test]
@@ -2248,8 +2442,6 @@ mod tests {
                 http_auth_type: String::new(),
                 private_key_import_path: key_path.to_string_lossy().into_owned(),
                 host_fingerprint: String::new(),
-                security_mode: "readonly".into(),
-                allowed_commands: vec![],
                 base_url: String::new(),
                 auth_header: String::new(),
                 auth_location: String::new(),
@@ -2316,8 +2508,6 @@ mod tests {
             http_auth_type: String::new(),
             private_key_import_path: String::new(),
             host_fingerprint: String::new(),
-            security_mode: String::new(),
-            allowed_commands: vec![],
             base_url: String::new(),
             auth_header: String::new(),
             auth_location: String::new(),
@@ -2405,8 +2595,6 @@ mod tests {
             host_fingerprint: String::new(),
             host_fingerprint_host: String::new(),
             host_fingerprint_port: 0,
-            security_mode: String::new(),
-            allowed_commands: vec![],
             base_url: String::new(),
             auth_header: String::new(),
             auth_location: String::new(),
@@ -2434,7 +2622,6 @@ mod tests {
                 connections: vec![legacy],
                 editor_drafts: vec![],
                 activities: vec![],
-                approvals: vec![],
             })
             .unwrap();
         drop(vault);

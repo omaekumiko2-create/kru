@@ -38,9 +38,7 @@ rm -rf "$stage_root"
 mkdir -p "$package_root"
 cp "$binary_source" "$package_root/kru"
 chmod +x "$package_root/kru"
-cp "$project_root/README.md" "$project_root/README.zh-CN.md" "$project_root/SECURITY.md" "$project_root/LICENSE" "$package_root/"
-mkdir -p "$package_root/.github/assets"
-cp "$project_root/.github/assets/kru-hero.svg" "$project_root/.github/assets/kru-flow.svg" "$package_root/.github/assets/"
+cp "$project_root/README.md" "$project_root/LICENSE" "$package_root/"
 cp -R "$project_root/browser-extension" "$package_root/browser-extension"
 
 (

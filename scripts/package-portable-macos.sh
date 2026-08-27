@@ -37,9 +37,7 @@ esac
 rm -rf "$stage_root"
 mkdir -p "$package_root"
 /usr/bin/ditto "$app_source" "$package_root/KRU.app"
-cp "$project_root/README.md" "$project_root/README.zh-CN.md" "$project_root/SECURITY.md" "$project_root/LICENSE" "$package_root/"
-mkdir -p "$package_root/.github/assets"
-cp "$project_root/.github/assets/kru-hero.svg" "$project_root/.github/assets/kru-flow.svg" "$package_root/.github/assets/"
+cp "$project_root/README.md" "$project_root/LICENSE" "$package_root/"
 cp -R "$project_root/browser-extension" "$package_root/browser-extension"
 
 signature_details="$(/usr/bin/codesign --display --verbose=4 "$package_root/KRU.app" 2>&1 || true)"

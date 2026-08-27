@@ -23,7 +23,7 @@ use std::{
 };
 use tokio::{
     net::TcpListener,
-    sync::{Mutex, broadcast, oneshot},
+    sync::{Mutex, mpsc, oneshot},
     task::JoinHandle,
     time::{sleep, timeout},
 };
@@ -32,12 +32,44 @@ use tower_http::cors::{Any, CorsLayer};
 use uuid::Uuid;
 
 const JOB_TIMEOUT: Duration = Duration::from_secs(35);
+const EXTENSION_QUEUE_TIMEOUT: Duration = Duration::from_millis(500);
+const EXTENSION_RECONNECT_GRACE: Duration = Duration::from_secs(2);
+const HTTP_REQUEST_TIMEOUT: Duration = Duration::from_secs(40);
+const HEALTH_REQUEST_TIMEOUT: Duration = Duration::from_secs(2);
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct BrowserJob {
     id: Uuid,
     value: String,
+    #[serde(default)]
+    expires_at: u64,
+}
+
+impl BrowserJob {
+    fn with_deadline(id: Uuid, value: String) -> Self {
+        Self {
+            id,
+            value,
+            expires_at: unix_millis().saturating_add(JOB_TIMEOUT.as_millis() as u64),
+        }
+    }
+
+    fn normalize_deadline(&mut self) {
+        let now = unix_millis();
+        let latest = now.saturating_add(JOB_TIMEOUT.as_millis() as u64);
+        if self.expires_at == 0 || self.expires_at > latest {
+            self.expires_at = latest;
+        }
+    }
+
+    fn remaining(&self) -> Duration {
+        Duration::from_millis(self.expires_at.saturating_sub(unix_millis()))
+    }
+
+    fn is_expired(&self) -> bool {
+        self.remaining().is_zero()
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -83,13 +115,58 @@ struct PairingCode {
 }
 
 #[derive(Clone)]
+struct ActiveExtension {
+    id: Uuid,
+    jobs: mpsc::Sender<BrowserJob>,
+}
+
+#[derive(Default)]
+struct ExtensionPool {
+    clients: HashMap<Uuid, mpsc::Sender<BrowserJob>>,
+    active: Option<Uuid>,
+}
+
+impl ExtensionPool {
+    fn add(&mut self, id: Uuid, jobs: mpsc::Sender<BrowserJob>) {
+        self.clients.insert(id, jobs);
+        if self.active.is_none() {
+            self.active = Some(id);
+        }
+    }
+
+    fn activate(&mut self, id: Uuid) -> bool {
+        if self.clients.contains_key(&id) {
+            self.active = Some(id);
+            true
+        } else {
+            false
+        }
+    }
+
+    fn remove(&mut self, id: Uuid) {
+        self.clients.remove(&id);
+        if self.active == Some(id) {
+            self.active = self.clients.keys().next().copied();
+        }
+    }
+
+    fn active(&self) -> Option<ActiveExtension> {
+        let id = self.active?;
+        Some(ActiveExtension {
+            id,
+            jobs: self.clients.get(&id)?.clone(),
+        })
+    }
+}
+
+#[derive(Clone)]
 struct BridgeServerState {
     vault: Vault,
     port: u16,
     internal_token: String,
     extension_token: String,
     pairing: Arc<Mutex<Option<PairingCode>>>,
-    jobs: broadcast::Sender<BrowserJob>,
+    extensions: Arc<Mutex<ExtensionPool>>,
     pending: Arc<Mutex<HashMap<Uuid, oneshot::Sender<BrowserFillResult>>>>,
     cancellation: CancellationToken,
 }
@@ -126,7 +203,11 @@ impl BrowserBridge {
         Self {
             vault,
             runtime: Arc::new(Mutex::new(Runtime::default())),
-            client: reqwest::Client::new(),
+            client: reqwest::Client::builder()
+                .timeout(HTTP_REQUEST_TIMEOUT)
+                .connect_timeout(Duration::from_secs(2))
+                .build()
+                .expect("reqwest client configuration must be valid"),
         }
     }
 
@@ -259,10 +340,7 @@ impl BrowserBridge {
             bail!("尚未配对 Chromium 扩展");
         }
         self.ensure_started(settings.browser_port).await?;
-        let job = BrowserJob {
-            id: Uuid::new_v4(),
-            value,
-        };
+        let job = BrowserJob::with_deadline(Uuid::new_v4(), value);
         let response = self
             .client
             .post(format!(
@@ -297,6 +375,7 @@ impl BrowserBridge {
                 .client
                 .get(format!("http://127.0.0.1:{port}/internal/health"))
                 .bearer_auth(self.internal_token()?)
+                .timeout(HEALTH_REQUEST_TIMEOUT)
                 .send()
                 .await
                 .is_ok_and(|response| response.status().is_success());
@@ -310,14 +389,13 @@ impl BrowserBridge {
         match TcpListener::bind(("127.0.0.1", port)).await {
             Ok(listener) => {
                 let cancellation = CancellationToken::new();
-                let (jobs, _) = broadcast::channel(16);
                 let state = BridgeServerState {
                     vault: self.vault.clone(),
                     port,
                     internal_token,
                     extension_token,
                     pairing: Arc::new(Mutex::new(None)),
-                    jobs,
+                    extensions: Arc::new(Mutex::new(ExtensionPool::default())),
                     pending: Arc::new(Mutex::new(HashMap::new())),
                     cancellation: cancellation.clone(),
                 };
@@ -357,6 +435,7 @@ impl BrowserBridge {
                     .client
                     .get(format!("http://127.0.0.1:{port}/internal/health"))
                     .bearer_auth(internal_token)
+                    .timeout(HEALTH_REQUEST_TIMEOUT)
                     .send()
                     .await
                     .context("Browser Bridge 端口已被其他程序占用")?;
@@ -506,19 +585,24 @@ async fn claim(
 async fn submit_job(
     State(state): State<BridgeServerState>,
     headers: HeaderMap,
-    Json(job): Json<BrowserJob>,
+    Json(mut job): Json<BrowserJob>,
 ) -> Result<Json<BrowserFillResult>, (StatusCode, String)> {
     require_bearer(&headers, &state.internal_token)?;
+    job.normalize_deadline();
     let (sender, receiver) = oneshot::channel();
     state.pending.lock().await.insert(job.id, sender);
-    if state.jobs.send(job.clone()).is_err() {
+    let delivered = deliver_to_extension_with_grace(&state, &job).await;
+    if !delivered {
         state.pending.lock().await.remove(&job.id);
+        if job.is_expired() {
+            return Err((StatusCode::GATEWAY_TIMEOUT, "浏览器填写超时".to_owned()));
+        }
         return Err((
             StatusCode::SERVICE_UNAVAILABLE,
             "浏览器扩展未连接".to_owned(),
         ));
     }
-    match timeout(JOB_TIMEOUT, receiver).await {
+    match timeout(job.remaining(), receiver).await {
         Ok(Ok(result)) => {
             if result.status == "ok" {
                 Ok(Json(result))
@@ -531,6 +615,42 @@ async fn submit_job(
             Err((StatusCode::GATEWAY_TIMEOUT, "浏览器填写超时".to_owned()))
         }
     }
+}
+
+async fn deliver_to_extension_with_grace(state: &BridgeServerState, job: &BrowserJob) -> bool {
+    let grace = EXTENSION_RECONNECT_GRACE.min(job.remaining());
+    let deadline = tokio::time::Instant::now() + grace;
+    loop {
+        if deliver_to_extension(state, job).await {
+            return true;
+        }
+        if job.is_expired() || tokio::time::Instant::now() >= deadline {
+            return false;
+        }
+        sleep(Duration::from_millis(50)).await;
+    }
+}
+
+async fn deliver_to_extension(state: &BridgeServerState, job: &BrowserJob) -> bool {
+    let candidates = state.extensions.lock().await.clients.len();
+    for _ in 0..candidates {
+        if !job_is_deliverable(state, job).await {
+            return false;
+        }
+        let Some(active) = state.extensions.lock().await.active() else {
+            break;
+        };
+        let send_timeout = EXTENSION_QUEUE_TIMEOUT.min(job.remaining());
+        match timeout(send_timeout, active.jobs.send(job.clone())).await {
+            Ok(Ok(())) => return true,
+            Ok(Err(_)) | Err(_) => state.extensions.lock().await.remove(active.id),
+        }
+    }
+    false
+}
+
+async fn job_is_deliverable(state: &BridgeServerState, job: &BrowserJob) -> bool {
+    !job.is_expired() && state.pending.lock().await.contains_key(&job.id)
 }
 
 async fn reset_pairing(
@@ -582,28 +702,52 @@ async fn extension_socket(socket: WebSocket, state: BridgeServerState) {
             serde_json::json!({"type":"ready"}).to_string().into(),
         ))
         .await;
-    let mut jobs = state.jobs.subscribe();
+    let connection_id = Uuid::new_v4();
+    let (job_sender, mut jobs) = mpsc::channel(8);
+    state.extensions.lock().await.add(connection_id, job_sender);
     loop {
         tokio::select! {
             job = jobs.recv() => {
-                let Ok(job) = job else { break; };
+                let Some(job) = job else { break; };
+                if !job_is_deliverable(&state, &job).await { continue; }
                 let Ok(json) = serde_json::to_string(&serde_json::json!({"type":"job", "job":job})) else { continue; };
-                if sender.send(Message::Text(json.into())).await.is_err() { break; }
+                match timeout(job.remaining(), sender.send(Message::Text(json.into()))).await {
+                    Ok(Ok(())) => {}
+                    Ok(Err(_)) | Err(_) => break,
+                }
             }
             message = receiver.next() => {
-                let Some(Ok(Message::Text(message))) = message else { break; };
-                let Ok(message) = serde_json::from_str::<ExtensionMessage>(&message) else { continue; };
-                if message.kind != "complete" { continue; }
-                let Some(job_id) = message.job_id else { continue; };
-                if let Some(pending) = state.pending.lock().await.remove(&job_id) {
-                    let _ = pending.send(BrowserFillResult {
-                        status: if message.ok { "ok" } else { "error" }.to_owned(),
-                        message: message.message,
-                    });
+                match message {
+                    Some(Ok(Message::Text(message))) => {
+                        let Ok(message) = serde_json::from_str::<ExtensionMessage>(&message) else { continue; };
+                        if message.kind == "ping" {
+                            let pong = serde_json::json!({"type":"pong"}).to_string();
+                            if sender.send(Message::Text(pong.into())).await.is_err() { break; }
+                            continue;
+                        }
+                        if message.kind == "activate" {
+                            state.extensions.lock().await.activate(connection_id);
+                            continue;
+                        }
+                        if message.kind != "complete" { continue; }
+                        let Some(job_id) = message.job_id else { continue; };
+                        if let Some(pending) = state.pending.lock().await.remove(&job_id) {
+                            let _ = pending.send(BrowserFillResult {
+                                status: if message.ok { "ok" } else { "error" }.to_owned(),
+                                message: message.message,
+                            });
+                        }
+                    }
+                    Some(Ok(Message::Ping(payload))) => {
+                        if sender.send(Message::Pong(payload)).await.is_err() { break; }
+                    }
+                    Some(Ok(Message::Pong(_))) | Some(Ok(Message::Binary(_))) => {}
+                    Some(Ok(Message::Close(_))) | Some(Err(_)) | None => break,
                 }
             }
         }
     }
+    state.extensions.lock().await.remove(connection_id);
 }
 
 fn require_bearer(headers: &HeaderMap, expected: &str) -> Result<(), (StatusCode, String)> {
@@ -631,6 +775,13 @@ fn derive_token(secret: &str, role: &str) -> Result<String> {
     hasher.update(role.as_bytes());
     hasher.update(secret.as_bytes());
     Ok(STANDARD_NO_PAD.encode(hasher.finalize()))
+}
+
+fn unix_millis() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis() as u64
 }
 
 pub fn current_totp(secret: &str) -> Result<String> {
@@ -691,6 +842,19 @@ mod tests {
     use super::*;
     use tempfile::tempdir;
 
+    fn test_server_state(vault: Vault) -> BridgeServerState {
+        BridgeServerState {
+            vault,
+            port: 0,
+            internal_token: "internal".to_owned(),
+            extension_token: "extension".to_owned(),
+            pairing: Arc::new(Mutex::new(None)),
+            extensions: Arc::new(Mutex::new(ExtensionPool::default())),
+            pending: Arc::new(Mutex::new(HashMap::new())),
+            cancellation: CancellationToken::new(),
+        }
+    }
+
     #[test]
     fn totp_matches_rfc_vector_truncated_to_six_digits() {
         assert_eq!(
@@ -704,6 +868,71 @@ mod tests {
         let internal = derive_token("same-local-secret", "internal").unwrap();
         let extension = derive_token("same-local-secret", "extension").unwrap();
         assert_ne!(internal, extension);
+    }
+
+    #[tokio::test]
+    async fn stalled_extension_queue_is_bounded_and_client_is_removed() {
+        let directory = tempdir().unwrap();
+        let state = test_server_state(Vault::open(directory.path().join("vault")).unwrap());
+        let (jobs, mut receiver) = mpsc::channel(1);
+        jobs.send(BrowserJob::with_deadline(
+            Uuid::new_v4(),
+            "already queued".to_owned(),
+        ))
+        .await
+        .unwrap();
+        state.extensions.lock().await.add(Uuid::new_v4(), jobs);
+
+        let mut job = BrowserJob::with_deadline(Uuid::new_v4(), "secret".to_owned());
+        job.expires_at = unix_millis().saturating_add(100);
+        let (result, _receiver) = oneshot::channel();
+        state.pending.lock().await.insert(job.id, result);
+
+        let started = std::time::Instant::now();
+        assert!(!deliver_to_extension(&state, &job).await);
+        assert!(started.elapsed() < Duration::from_secs(1));
+        assert!(state.extensions.lock().await.active().is_none());
+        assert_eq!(receiver.recv().await.unwrap().value, "already queued");
+    }
+
+    #[tokio::test]
+    async fn expired_or_cancelled_jobs_cannot_be_delivered_later() {
+        let directory = tempdir().unwrap();
+        let state = test_server_state(Vault::open(directory.path().join("vault")).unwrap());
+
+        let mut expired = BrowserJob::with_deadline(Uuid::new_v4(), "expired".to_owned());
+        expired.expires_at = unix_millis().saturating_sub(1);
+        expired.normalize_deadline();
+        let (result, _receiver) = oneshot::channel();
+        state.pending.lock().await.insert(expired.id, result);
+        assert!(expired.is_expired());
+        assert!(!job_is_deliverable(&state, &expired).await);
+
+        let active = BrowserJob::with_deadline(Uuid::new_v4(), "active".to_owned());
+        let (result, _receiver) = oneshot::channel();
+        state.pending.lock().await.insert(active.id, result);
+        assert!(job_is_deliverable(&state, &active).await);
+        state.pending.lock().await.remove(&active.id);
+        assert!(!job_is_deliverable(&state, &active).await);
+    }
+
+    #[tokio::test]
+    async fn first_job_waits_briefly_for_extension_reconnect() {
+        let directory = tempdir().unwrap();
+        let state = test_server_state(Vault::open(directory.path().join("vault")).unwrap());
+        let job = BrowserJob::with_deadline(Uuid::new_v4(), "secret".to_owned());
+        let (result, _receiver) = oneshot::channel();
+        state.pending.lock().await.insert(job.id, result);
+
+        let extensions = state.extensions.clone();
+        let (jobs, mut receiver) = mpsc::channel(1);
+        tokio::spawn(async move {
+            sleep(Duration::from_millis(100)).await;
+            extensions.lock().await.add(Uuid::new_v4(), jobs);
+        });
+
+        assert!(deliver_to_extension_with_grace(&state, &job).await);
+        assert_eq!(receiver.recv().await.unwrap().id, job.id);
     }
 
     #[tokio::test]
@@ -786,6 +1015,167 @@ mod tests {
                 .is_some_and(|token| token.len() > 20)
         );
         assert!(vault.settings().unwrap().browser_paired);
+        bridge.stop().await;
+    }
+
+    #[tokio::test]
+    async fn activated_extension_receives_the_job_and_a_standby_takes_over() {
+        use tokio_tungstenite::tungstenite::Message as ClientMessage;
+
+        let port = {
+            let listener = std::net::TcpListener::bind(("127.0.0.1", 0)).unwrap();
+            listener.local_addr().unwrap().port()
+        };
+        let directory = tempdir().unwrap();
+        let vault = Vault::open(directory.path().join("vault")).unwrap();
+        let mut settings = vault.settings().unwrap();
+        settings.browser_enabled = true;
+        settings.browser_port = port;
+        vault.update_settings(settings).unwrap();
+        let bridge = BrowserBridge::new(vault);
+        bridge.sync().await;
+
+        let url = format!("ws://127.0.0.1:{port}/extension");
+        let auth = serde_json::json!({
+            "type": "auth",
+            "token": bridge.extension_token().unwrap()
+        })
+        .to_string();
+        let (mut first, _) = tokio_tungstenite::connect_async(&url).await.unwrap();
+        first
+            .send(ClientMessage::Text(auth.clone().into()))
+            .await
+            .unwrap();
+        assert!(
+            first
+                .next()
+                .await
+                .unwrap()
+                .unwrap()
+                .into_text()
+                .unwrap()
+                .contains("ready")
+        );
+
+        let (mut second, _) = tokio_tungstenite::connect_async(&url).await.unwrap();
+        second.send(ClientMessage::Text(auth.into())).await.unwrap();
+        assert!(
+            second
+                .next()
+                .await
+                .unwrap()
+                .unwrap()
+                .into_text()
+                .unwrap()
+                .contains("ready")
+        );
+        second
+            .send(ClientMessage::Text(r#"{"type":"activate"}"#.into()))
+            .await
+            .unwrap();
+        second
+            .send(ClientMessage::Text(r#"{"type":"ping"}"#.into()))
+            .await
+            .unwrap();
+        assert!(
+            second
+                .next()
+                .await
+                .unwrap()
+                .unwrap()
+                .into_text()
+                .unwrap()
+                .contains("pong")
+        );
+
+        let job_id = Uuid::new_v4();
+        let client = reqwest::Client::new();
+        let job_request = tokio::spawn({
+            let url = format!("http://127.0.0.1:{port}/internal/jobs");
+            let token = bridge.internal_token().unwrap();
+            async move {
+                client
+                    .post(url)
+                    .bearer_auth(token)
+                    .json(&serde_json::json!({"id": job_id, "value": "test-value"}))
+                    .send()
+                    .await
+                    .unwrap()
+            }
+        });
+
+        let delivered = timeout(Duration::from_secs(2), second.next())
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap()
+            .into_text()
+            .unwrap();
+        let delivered: serde_json::Value = serde_json::from_str(&delivered).unwrap();
+        assert_eq!(delivered["type"], "job");
+        assert_eq!(delivered["job"]["id"], job_id.to_string());
+
+        if let Ok(Some(Ok(ClientMessage::Text(message)))) =
+            timeout(Duration::from_millis(250), first.next()).await
+        {
+            let message: serde_json::Value = serde_json::from_str(&message).unwrap();
+            assert_ne!(message["type"], "job");
+        }
+
+        second
+            .send(ClientMessage::Text(
+                serde_json::json!({
+                    "type": "complete",
+                    "jobId": job_id,
+                    "ok": true,
+                    "message": "done"
+                })
+                .to_string()
+                .into(),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(job_request.await.unwrap().status(), StatusCode::OK);
+
+        second.close(None).await.unwrap();
+        sleep(Duration::from_millis(50)).await;
+        let takeover_job_id = Uuid::new_v4();
+        let takeover_request = tokio::spawn({
+            let url = format!("http://127.0.0.1:{port}/internal/jobs");
+            let token = bridge.internal_token().unwrap();
+            async move {
+                reqwest::Client::new()
+                    .post(url)
+                    .bearer_auth(token)
+                    .json(&serde_json::json!({"id": takeover_job_id, "value": "next"}))
+                    .send()
+                    .await
+                    .unwrap()
+            }
+        });
+        let delivered = timeout(Duration::from_secs(2), first.next())
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap()
+            .into_text()
+            .unwrap();
+        let delivered: serde_json::Value = serde_json::from_str(&delivered).unwrap();
+        assert_eq!(delivered["job"]["id"], takeover_job_id.to_string());
+        first
+            .send(ClientMessage::Text(
+                serde_json::json!({
+                    "type": "complete",
+                    "jobId": takeover_job_id,
+                    "ok": true,
+                    "message": "done"
+                })
+                .to_string()
+                .into(),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(takeover_request.await.unwrap().status(), StatusCode::OK);
         bridge.stop().await;
     }
 }

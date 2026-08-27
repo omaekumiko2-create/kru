@@ -3,6 +3,19 @@ const $ = (selector, root = document) => root.querySelector(selector);
 const $$ = (selector, root = document) => [...root.querySelectorAll(selector)];
 const HAN_TEXT = /[\u3400-\u9fff]/;
 
+const isMacOS = navigator.platform.startsWith('Mac') || navigator.userAgent.includes('Macintosh');
+document.documentElement.classList.toggle('platform-macos', isMacOS);
+
+if (isMacOS) {
+  const titleDragRegion = document.querySelector('.title-drag-region');
+  const isTitleControl = (target) => Boolean(target.closest?.('button, input, select, textarea, a, [role="button"]'));
+  titleDragRegion.addEventListener('mousedown', (event) => {
+    if (event.button === 0 && !isTitleControl(event.target)) event.preventDefault();
+  });
+  titleDragRegion.addEventListener('selectstart', (event) => event.preventDefault());
+  titleDragRegion.addEventListener('dragstart', (event) => event.preventDefault());
+}
+
 let language = localStorage.getItem('kru-language') === 'en' ? 'en' : 'zh';
 
 function localized(zh, en) {
@@ -26,19 +39,22 @@ const staticCopy = [
   ['#page-settings .page-search-input', 'aria-label', '搜索系统设置', 'Search settings'],
   ['#header-export-backup-button', 'text', '一键打包', 'EXPORT'],
   ['#header-import-backup-button', 'text', '一键导入包', 'IMPORT'],
-  ['[data-module="MCP / 01"] .settings-heading h2', 'text', 'Agent 接入', 'AGENT SETUP'],
-  ['[data-module="MCP / 01"] .settings-heading p', 'text', '将 KRU 注册为本地 stdio MCP。', 'Register KRU as a local stdio MCP.'],
-  ['[data-module="REVIEW / 02"] .settings-heading h2', 'text', '审核模式', 'APPROVAL MODE'],
-  ['[data-module="REVIEW / 02"] .settings-heading p', 'text', 'Agent 每次使用秘密前，都要由你在 KRU 中明确允许。', 'Require your explicit approval before every agent use of a secret.'],
-  ['.approval-mode-note span', 'text', '请求只显示调用方、项目和动作；超时或拒绝时不会使用秘密。', 'Requests show only the caller, item, and action. Timeout or denial prevents secret use.'],
-  ['[data-module="APP / 03"] .settings-heading h2', 'text', '窗口与提醒', 'WINDOW & ALERTS'],
-  ['[data-module="APP / 03"] .settings-heading p', 'text', '控制关闭按钮行为，以及审核请求的系统级提醒。', 'Control close-button behavior and system-level approval alerts.'],
+  ['[data-module="SYSTEM / 01"] .settings-heading h2', 'text', '系统入口', 'SYSTEM ACCESS'],
+  ['[data-module="SYSTEM / 01"] .settings-heading p', 'text', '控制 KRU 的桌面快捷方式与开机启动。', 'Control the KRU desktop shortcut and launch at login.'],
+  ['#desktop-shortcut-option strong', 'text', '创建快捷方式到桌面', 'CREATE DESKTOP SHORTCUT'],
+  ['#desktop-shortcut-option small', 'text', '在当前用户桌面创建 KRU 快捷方式', 'Create a KRU shortcut on the current user’s desktop.'],
+  ['#launch-at-login-option strong', 'text', '开机自启动', 'LAUNCH AT LOGIN'],
+  ['#launch-at-login-option small', 'text', '登录系统后自动启动 KRU，并保持单实例', 'Start KRU after sign-in while preserving single-instance behavior.'],
+  ['[data-module="MCP / 02"] .settings-heading h2', 'text', 'Agent 接入', 'AGENT SETUP'],
+  ['[data-module="MCP / 02"] .settings-heading p', 'text', '注册本地 stdio MCP；支持的 Agent 同时安装“连接任务先查 KRU”规则。', 'Register the local stdio MCP and install the KRU-first connection rule where supported.'],
+  ['[data-module="APP / 03"] .settings-heading h2', 'text', '窗口与锁定', 'WINDOW & LOCK'],
+  ['[data-module="APP / 03"] .settings-heading p', 'text', '控制关闭按钮与本地 PIN 锁。', 'Control the close button and local PIN lock.'],
   ['label[for="close-behavior"] strong', 'text', '关闭按钮', 'CLOSE BUTTON'],
-  ['label[for="close-behavior"] small', 'text', '最小化可保持托盘菜单与审核提醒', 'Minimizing keeps tray controls and approval alerts available.'],
+  ['label[for="close-behavior"] small', 'text', '最小化可保留托盘菜单', 'Minimizing keeps tray controls available.'],
   ['#close-behavior option[value="tray"]', 'text', '最小化到托盘', 'MINIMIZE TO TRAY'],
   ['#close-behavior option[value="exit"]', 'text', '退出 KRU', 'QUIT KRU'],
-  ['.desktop-option:nth-child(2) strong', 'text', '审核系统弹窗', 'SYSTEM APPROVAL POPUP'],
-  ['.desktop-option:nth-child(2) small', 'text', '开启后同时保留 KRU 内审核窗口', 'KRU’s in-app approval window always remains available.'],
+  ['.pin-option strong', 'text', 'PIN 锁', 'PIN LOCK'],
+  ['.pin-option small', 'text', '关闭后移除当前 PIN；再次开启时设置新的 PIN', 'Turning this off removes the current PIN. Set a new PIN when enabling it again.'],
   ['.agent-restart-notice span', 'text', '完成后重启 Agent。', 'Restart the agent after setup.'],
   ['#agent-client-list .agent-scan-placeholder', 'text', '正在扫描本机 Agent', 'SCANNING LOCAL AGENTS'],
   ['.manual-mcp-config summary', 'text', '其他 Agent / 手动配置', 'OTHER AGENT / MANUAL SETUP'],
@@ -53,12 +69,13 @@ const staticCopy = [
   ['#open-extension-button', 'text', '扩展目录', 'EXTENSION FOLDER'],
   ['#reset-pairing-button', 'text', '重置', 'RESET'],
   ['[data-module="SAFE / 05"] .settings-heading h2', 'text', '本地数据', 'LOCAL DATA'],
-  ['[data-module="SAFE / 05"] .settings-heading p', 'text', '用独立密码导出可跨平台迁移的加密包。', 'Export an encrypted cross-platform package with a separate password.'],
+  ['[data-module="SAFE / 05"] .settings-heading p', 'text', '导出由 KRU 自动解密的加密包，避免秘密以原文直接暴露。', 'Export an encrypted package KRU unlocks automatically, preventing direct plaintext exposure.'],
   ['#open-data-button', 'text', '打开数据目录', 'OPEN DATA FOLDER'],
-  ['#owner-lock-description', 'text', 'PIN 保护明文查看和调用审核；模块值默认隐藏，仅在你开启后对 Agent 可见。', 'The PIN protects plaintext viewing and call approval. Module values stay hidden unless you make them visible to agents.'],
+  ['#owner-lock-description', 'text', 'PIN 保护明文查看；模块值默认隐藏，仅在你开启后对 Agent 可见。', 'The PIN protects plaintext viewing. Module values stay hidden unless you make them visible to agents.'],
   ['#owner-pin', 'label', '六位数字 PIN', 'SIX-DIGIT PIN'],
   ['#owner-pin-confirm', 'label', '再次输入 PIN', 'CONFIRM PIN'],
   ['.lock-note span', 'text', '秘密仍由本机随机主密钥加密；PIN 只是本地查看锁。', 'Secrets remain encrypted by the local random master key. The PIN only locks plaintext viewing.'],
+  ['#owner-pin-cancel', 'text', '取消', 'CANCEL'],
   ['[data-close-modal].icon-button', 'aria-label', '关闭编辑器', 'Close editor'],
   ['#connection-name', 'label', '名称', 'NAME'],
   ['#connection-description', 'label-html', '备注 / 用途 <em>可选</em>', 'NOTES / PURPOSE <em>OPTIONAL</em>'],
@@ -81,31 +98,17 @@ const staticCopy = [
   ['[data-item-template="ssh"] > span', 'html', 'SSH<small>主机 + 端口 + 账号 + 密码</small>', 'SSH<small>HOST + PORT + USER + PASSWORD</small>'],
   ['[data-item-template="api"] > span', 'html', 'API<small>API 凭据</small>', 'API<small>API CREDENTIAL</small>'],
   ['[data-item-template="blank"] > span', 'html', '空白<small>从零添加模块</small>', 'BLANK<small>START WITH NO MODULES</small>'],
-  ['#ssh-security-mode', 'label', '命令权限', 'COMMAND ACCESS'],
-  ['#ssh-security-mode option[value="readonly"]', 'text', '观察（推荐）', 'OBSERVE (RECOMMENDED)'],
-  ['#ssh-security-mode option[value="diagnostic"]', 'text', '诊断', 'DIAGNOSTIC'],
-  ['#ssh-security-mode option[value="restricted"]', 'text', '受限命令', 'RESTRICTED'],
-  ['#ssh-security-mode option[value="unrestricted"]', 'text', '完全控制', 'FULL CONTROL'],
   ['#ssh-fingerprint', 'label-html', '服务器身份指纹 <em>与密码/私钥无关</em>', 'SERVER FINGERPRINT <em>INDEPENDENT OF LOGIN METHOD</em>'],
   ['#ssh-fingerprint', 'placeholder', '首次连接自动记录', 'RECORDED ON FIRST CONNECTION'],
-  ['#ssh-allowed-commands', 'label-html', '允许的命令前缀 <em>每行一个</em>', 'ALLOWED COMMAND PREFIXES <em>ONE PER LINE</em>'],
-  ['#ssh-options summary', 'text', 'SSH 高级设置', 'SSH ADVANCED SETTINGS'],
+  ['#ssh-options summary', 'text', 'SSH 服务器身份', 'SSH SERVER IDENTITY'],
   ['.check-row strong', 'text', '启用此项目', 'ENABLE ITEM'],
   ['.check-row small', 'text', '禁用后 Agent 无法使用', 'Agents cannot use a disabled item.'],
   ['.secret-hint', 'text', '当前项目的明文只在已解锁 GUI 中显示', 'Plaintext is visible only in the unlocked GUI.'],
   ['#connection-form .modal-footer [data-close-modal]', 'text', '取消', 'CANCEL'],
   ['#save-connection-button', 'text', '保存', 'SAVE'],
-  ['#backup-password', 'label', '备份密码', 'BACKUP PASSWORD'],
-  ['#backup-password-confirm', 'label', '再次输入', 'CONFIRM PASSWORD'],
+  ['#backup-password', 'label', '旧版备份密码', 'LEGACY BACKUP PASSWORD'],
   ['#backup-cancel', 'text', '取消', 'CANCEL'],
   ['#backup-action', 'text', '继续', 'CONTINUE'],
-  ['#approval-title', 'text', '允许本次调用？', 'ALLOW THIS CALL?'],
-  ['.approval-details > div:nth-child(1) dt', 'text', '调用方', 'CALLER'],
-  ['.approval-details > div:nth-child(2) dt', 'text', '项目', 'ITEM'],
-  ['.approval-details > div:nth-child(3) dt', 'text', '动作', 'ACTION'],
-  ['.approval-details > div:nth-child(4) dt', 'text', '目标', 'TARGET'],
-  ['#approval-deny', 'text', '拒绝', 'DENY'],
-  ['#approval-allow', 'text', '允许一次', 'ALLOW ONCE'],
 ];
 
 function applyLanguage() {
@@ -124,6 +127,12 @@ function applyLanguage() {
       if (label) target === 'label-html' ? label.innerHTML = copy : label.textContent = copy;
     }
   }
+  if (isMacOS) {
+    $('[data-module="SYSTEM / 01"] .settings-heading p').textContent = localized(
+      '控制 KRU 的登录时启动。',
+      'Control whether KRU launches at login.',
+    );
+  }
 }
 
 function publicMessage(value, fallback = localized('操作失败', 'Operation failed')) {
@@ -132,10 +141,19 @@ function publicMessage(value, fallback = localized('操作失败', 'Operation fa
   return fallback;
 }
 
+let settingsWriteQueue = Promise.resolve();
+
+function updateSettings(patch) {
+  const operation = settingsWriteQueue.then(() => invoke('update_settings', { patch }));
+  settingsWriteQueue = operation.catch(() => {});
+  return operation;
+}
+
 const api = {
   state: () => invoke('get_state'),
   ownerStatus: () => invoke('owner_status'),
   ownerSetPin: (pin) => invoke('owner_set_pin', { pin }),
+  ownerDisablePin: () => invoke('owner_disable_pin'),
   ownerUnlock: (pin) => invoke('owner_unlock', { pin }),
   ownerTouch: () => invoke('owner_touch'),
   ownerLock: () => invoke('owner_lock'),
@@ -149,9 +167,10 @@ const api = {
   remove: (id) => invoke('delete_connection', { id }),
   test: (id) => invoke('test_connection', { id }),
   resetTrust: (id) => invoke('reset_ssh_fingerprint', { id }),
-  settings: (settings) => invoke('update_settings', { settings }),
-  approvals: () => invoke('approval_requests'),
-  resolveApproval: (id, approved) => invoke('resolve_approval', { id, approved }),
+  settings: updateSettings,
+  systemIntegration: () => invoke('system_integration_status'),
+  setDesktopShortcut: (enabled) => invoke('set_desktop_shortcut', { enabled }),
+  setLaunchAtLogin: (enabled) => invoke('set_launch_at_login', { enabled }),
   clear: () => invoke('clear_activities'),
   copyConfig: (format) => invoke('copy_mcp_config', { format }),
   agents: () => invoke('agent_mcp_status'),
@@ -162,13 +181,15 @@ const api = {
   quickPair: (port) => invoke('quick_pair_browser', { port }),
   resetPair: () => invoke('reset_browser_pairing'),
   extensionFolder: () => invoke('open_browser_extension_folder'),
-  exportBackup: (password) => invoke('export_backup', { password }),
-  importBackup: (password) => invoke('import_backup', { password }),
+  exportBackup: () => invoke('export_backup'),
+  importBackup: () => invoke('import_backup'),
+  importLegacyBackup: (password) => invoke('import_legacy_backup', { password }),
   dataFolder: () => invoke('open_data_folder'),
   window: (action) => invoke('window_action', { action }),
 };
 
 let state;
+let systemIntegrationState = { desktopShortcut: false, launchAtLogin: false };
 let activePage = 'connections';
 let currentActivityFilter = 'all';
 const pageSearch = { connections: '', activity: '', settings: '' };
@@ -179,16 +200,13 @@ let removedSecretFields = new Set();
 let editorExistingItem = null;
 let agentClients = [];
 let agentRestartRequired = false;
-let pendingApprovals = [];
-let approvalRefreshBusy = false;
-let lastApprovalNotifiedId = '';
-let backupMode = 'export';
 const ACTIVITY_PAGE_SIZE = 50;
 let activityVisibleCount = ACTIVITY_PAGE_SIZE;
 let activityMatchCount = 0;
 let activityLoadPending = false;
 const expandedActivityErrors = new Set();
 let ownerLockState = { pinConfigured: false, unlocked: false, expiresInSeconds: 0 };
+let ownerPinSetupRequested = false;
 let lastOwnerActivity = Date.now();
 const scrollThumbBindings = [];
 let scrollSyncQueued = false;
@@ -270,9 +288,13 @@ function focusPin(id) {
 function renderOwnerLock() {
   const configured = ownerLockState.pinConfigured;
   const unlocked = ownerLockState.unlocked;
-  $('#owner-lock-layer').classList.toggle('hidden', unlocked);
-  $('#owner-lock-button').classList.toggle('hidden', !unlocked);
+  const setupRequested = ownerPinSetupRequested && !configured;
+  const locked = configured && !unlocked;
+  const layerVisible = setupRequested || locked;
+  $('#owner-lock-layer').classList.toggle('hidden', !layerVisible);
+  $('#owner-lock-button').classList.toggle('hidden', !configured || !unlocked);
   $('#owner-pin-confirm-field').classList.toggle('hidden', configured);
+  $('#owner-pin-cancel').classList.toggle('hidden', !setupRequested);
   pinInputs('owner-pin-confirm').forEach((input) => { input.required = !configured; });
   $('#owner-lock-mode').textContent = configured ? 'OWNER VERIFY' : 'SET LOCAL PIN';
   $('#owner-lock-title').textContent = configured
@@ -280,14 +302,14 @@ function renderOwnerLock() {
     : localized('设置六位 PIN', 'SET SIX-DIGIT PIN');
   $('#owner-lock-code').textContent = configured ? 'LOCK' : 'INIT';
   $('#owner-unlock-action').textContent = configured ? 'UNLOCK' : 'SET PIN';
-  if (!unlocked) {
+  if (locked) {
     clearOwnerPlaintext();
     editorDrafts = [];
     renderDrafts();
   }
   clearPin('owner-pin');
   clearPin('owner-pin-confirm');
-  if (!unlocked) setTimeout(() => focusPin('owner-pin'), 0);
+  if (layerVisible) setTimeout(() => focusPin('owner-pin'), 0);
 }
 
 async function refreshOwnerLock(showError = true) {
@@ -307,6 +329,11 @@ async function lockOwner() {
 async function refresh(showError = true) {
   try {
     state = await api.state();
+    try {
+      systemIntegrationState = await api.systemIntegration();
+    } catch (_) {
+      systemIntegrationState = { desktopShortcut: false, launchAtLogin: false };
+    }
     language = state.settings.language === 'en' ? 'en' : 'zh';
     applyLanguage();
     render();
@@ -367,7 +394,6 @@ function renderMetrics() {
   const latest = state.activities[0];
   const browserOn = ['listening', 'delegated'].includes(state.browserBridge.status);
   const browserReady = browserOn && state.browserBridge.paired;
-  const approvalOn = Boolean(state.settings.approvalMode);
   const mcpReady = state.mcp.status === 'ready';
   const lastStatus = !latest ? 'idle' : latest.status === 'error' ? 'error' : 'ok';
   const lastCode = lastStatus === 'idle' ? '--' : lastStatus === 'error' ? 'ERR' : 'OK';
@@ -381,18 +407,37 @@ function renderMetrics() {
   const errors24h = activities24h.filter((activity) => activity.status === 'error').length;
   const passes24h = activities24h.length - errors24h;
   const actionTypes24h = new Set(activities24h.map((activity) => activityCode(activity.action)));
+  const lastUseType = lastAction === 'WEB' ? 'FILL' : lastAction;
+  const lastUseName = latest?.connectionName || (latest ? lastAction : 'NO CALL');
+  const registeredAgents = agentClients.filter((client) => client.state === 'registered').length;
+  const availableAgents = agentClients.filter((client) => client.state === 'available').length;
+  const brokenAgents = agentClients.filter((client) => ['stale', 'conflict', 'error'].includes(client.state)).length;
+  const displayCount = (count) => String(Math.min(Math.max(Number(count) || 0, 0), 9999)).padStart(4, '0');
+  const agentMeter = agentClients.slice(0, 8).map((client) => {
+    if (client.state === 'registered') return 'lit';
+    if (client.state === 'available') return 'info';
+    if (['stale', 'conflict', 'error'].includes(client.state)) return 'fault';
+    return '';
+  });
   const systemFault = state.mcp.status === 'error' || state.browserBridge.status === 'error';
-  const systemNeedsSetup = !mcpReady || !ownerLockState.pinConfigured || (browserOn && !browserReady);
+  const systemNeedsSetup = !mcpReady || (browserOn && !browserReady);
   const systemCode = systemFault ? 'ERR' : systemNeedsSetup ? 'SET' : 'RDY';
-  const browserCode = state.browserBridge.status === 'error' ? 'ERR' : !browserOn ? 'OFF' : browserReady ? 'RDY' : 'PAIR';
+  const settingsTelemetry = brokenAgents
+    ? { status: 'error', label: 'AGENTS', code: 'ERR', action: `${displayCount(brokenAgents)} REPAIR` }
+    : {
+        status: registeredAgents ? 'ok' : 'idle',
+        label: 'AGENTS',
+        code: displayCount(registeredAgents),
+        action: registeredAgents ? 'CONNECTED' : availableAgents ? 'READY TO ADD' : 'NO AGENT',
+      };
   const models = {
     connections: {
       channels: [['A', 'FILL', moduleCounts.fill ? 'on' : ''], ['B', 'SSH', moduleCounts.ssh ? 'on' : ''], ['C', 'HTTP', moduleCounts.api ? 'on' : ''], ['D', 'OFF', disabled ? 'warn' : '']],
       minor: 'PAGE A', mode: 'VAULT', valueKind: 'number', value: total, unit: 'ITEM',
       ready: !total ? 'EMPTY' : enabled ? 'READY' : 'DISABLED', tag: disabled ? compactCount(disabled, 'OFF') : total ? 'ALL ON' : 'LOCAL', readyTone: disabled ? 'warn' : '',
-      telemetryStatus: lastStatus, telemetryLabel: 'LAST USE', telemetryCode: lastCode, action: lastAction,
+      telemetryStatus: lastStatus, telemetryLabel: 'LAST USE', telemetryCode: lastCode, action: lastUseName,
       meter: recentCalls.map((activity) => `lit ${activity.status === 'error' ? 'fault' : ''} ${/BROWSER|浏览器|\bWEB\b/i.test(String(activity.action)) ? 'web' : ''}`),
-      legend: `<span class="${mcpReady ? 'lit' : ''}">MCP</span><span class="${browserReady ? 'lit web' : ''}">WEB</span><span class="${ownerLockState.pinConfigured ? 'lit' : ''}">PIN</span>`,
+      legend: `<span class="${lastUseType === 'FILL' ? 'lit' : ''}">FILL</span><span class="${lastUseType === 'SSH' ? 'lit' : ''}">SSH</span><span class="${lastUseType === 'API' ? 'lit' : ''}">HTTP</span>`,
     },
     activity: {
       channels: [['A', 'FILL', actionTypes24h.has('FILL') || actionTypes24h.has('WEB') ? 'on' : ''], ['B', 'SSH', actionTypes24h.has('SSH') ? 'on' : ''], ['C', 'HTTP', actionTypes24h.has('API') ? 'on' : ''], ['D', 'TERM', actionTypes24h.has('TERM') ? 'on' : '']],
@@ -400,15 +445,15 @@ function renderMetrics() {
       ready: !activities24h.length ? 'IDLE' : errors24h ? 'ATTENTION' : 'CLEAN', tag: errors24h ? compactCount(errors24h, 'ERR') : 'NO ERR', readyTone: errors24h ? 'fault' : '',
       telemetryStatus: lastStatus, telemetryLabel: 'LATEST', telemetryCode: lastCode, action: lastAction,
       meter: recentCalls.map((activity) => `lit ${activity.status === 'error' ? 'fault' : ''}`),
-      legend: `<span class="${passes24h ? 'lit' : ''}">PASS</span><span class="${errors24h ? 'fault' : ''}">ERR</span><span class="lit">24H</span>`,
+      legend: `<span class="${passes24h ? 'lit' : ''}">PASS</span><span class="${errors24h ? 'fault' : ''}">ERR</span>`,
     },
     settings: {
-      channels: [['A', 'MCP', mcpReady ? 'on' : 'error'], ['B', 'CRYPT', state.security.encrypted ? 'on' : 'error'], ['C', 'WEB', browserOn ? 'on web' : ''], ['D', 'REVIEW', approvalOn ? 'on' : '']],
+      channels: [['A', 'MCP', mcpReady ? 'on' : 'error'], ['B', 'CRYPT', state.security.encrypted ? 'on' : 'error'], ['C', 'WEB', browserOn ? 'on web' : ''], ['D', 'PIN', ownerLockState.pinConfigured ? 'on' : '']],
       minor: 'PAGE C', mode: 'SYSTEM', valueKind: 'word', value: systemCode, unit: 'STATE',
       ready: systemFault ? 'SERVICE FAULT' : systemNeedsSetup ? 'ACTION NEEDED' : 'LOCAL READY', tag: state.security.encrypted ? 'SEALED' : 'CHECK', readyTone: systemFault ? 'fault' : systemNeedsSetup ? 'warn' : '',
-      telemetryStatus: state.browserBridge.status === 'error' ? 'error' : browserOn ? 'ok' : 'idle', telemetryLabel: 'BROWSER', telemetryCode: browserCode, action: state.browserBridge.status === 'error' ? 'CHECK LOG' : !browserOn ? 'OPTIONAL' : browserReady ? 'PAIRED' : 'PAIR EXT',
-      meter: [mcpReady ? 'lit' : '', state.security.encrypted ? 'lit' : 'fault', ownerLockState.pinConfigured ? 'lit' : 'fault', approvalOn ? 'lit' : '', browserOn ? 'lit web' : '', browserReady ? 'lit web' : ''],
-      legend: `<span class="${mcpReady ? 'lit' : ''}">MCP</span><span class="${approvalOn ? 'lit' : ''}">REVIEW</span><span class="${ownerLockState.pinConfigured ? 'lit' : 'fault'}">PIN</span>`,
+      telemetryStatus: settingsTelemetry.status, telemetryLabel: settingsTelemetry.label, telemetryCode: settingsTelemetry.code, action: settingsTelemetry.action,
+      meter: agentMeter,
+      legend: `<span class="${registeredAgents ? 'lit' : ''}">ON</span><span class="${availableAgents ? 'info' : ''}">ADD</span><span class="${brokenAgents ? 'fault' : ''}">FIX</span>`,
     },
   };
   const model = models[activePage] || models.connections;
@@ -425,9 +470,9 @@ function renderMetrics() {
       <div class="display-ready ${model.readyTone || ''}"><i class="display-play"></i><strong>${model.ready}</strong><em>${model.tag}</em></div>
       <div class="display-ghost-labels" aria-hidden="true"><span>MCP</span><span>WEB</span><span>LOCK</span><span>AUTH</span></div>
     </div>
-    <div class="display-telemetry ${model.telemetryStatus}">
-      <div class="last-result"><span>${model.telemetryLabel}</span><strong>${model.telemetryCode}</strong></div>
-      <div class="last-action">${escapeHtml(model.action)}</div>
+    <div class="display-telemetry ${model.telemetryStatus} telemetry-page-${activePage}">
+      <div class="telemetry-head"><span>${model.telemetryLabel}</span><i aria-hidden="true"></i></div>
+      <div class="telemetry-reading"><strong>${model.telemetryCode}</strong><span>${escapeHtml(model.action)}</span></div>
       <div class="activity-meter" aria-label="${localized('当前页面状态', 'Current page status')}">${meter}</div>
       <div class="relay-legend">${model.legend}</div>
     </div>`;
@@ -470,9 +515,7 @@ function itemAuthModule(item) {
 function itemPermission(item) {
   const capabilities = itemCapabilities(item);
   if (capabilities.includes('http')) return (item.allowedMethods || []).join(' · ') || 'GET';
-  if (capabilities.includes('ssh')) return language === 'en'
-    ? ({ readonly: 'OBSERVE', diagnostic: 'DIAGNOSTIC', restricted: 'RESTRICTED', unrestricted: 'FULL CONTROL' })[item.securityMode] || 'OBSERVE'
-    : ({ readonly: '观察', diagnostic: '诊断', restricted: '受限', unrestricted: '完全控制' })[item.securityMode] || '观察';
+  if (capabilities.includes('ssh')) return 'SSH';
   return capabilities.includes('fill') ? 'FOCUS INPUT' : 'NOT EXPOSED';
 }
 
@@ -518,7 +561,7 @@ function renderConnections() {
       <div class="module-strip"><span>ITEM / ${String(stableIndex).padStart(2, '0')}</span><button class="module-state" type="button" data-action="toggle-enabled" data-id="${item.id}" aria-pressed="${item.enabled}" title="${item.enabled ? localized('点击停用；Agent 将无法使用其中的秘密', 'Disable this item; agents will no longer be able to use its secrets') : localized('点击启用；Agent 将可以使用其中的秘密', 'Enable this item so agents can use its secrets')}"><i class="status-dot ${item.enabled ? '' : 'off'}"></i>${item.enabled ? 'READY' : 'OFF'}</button></div>
       <div class="connection-top"><div class="connection-main"><div class="connection-name-row"><span class="connection-name"><span>${escapeHtml(item.name)}</span></span></div><div class="connection-address">${escapeHtml(itemDetail(item))}</div></div><div class="connection-symbol">${escapeHtml(authModule)}</div></div>
       ${item.description ? `<div class="connection-description">${escapeHtml(item.description)}</div>` : ''}
-      <div class="card-actions"><button class="small-button" data-action="test" data-id="${item.id}" ${canTest ? '' : 'disabled'}>${checkLabel}</button><button class="small-button" data-action="edit" data-id="${item.id}">EDIT</button><button class="small-button delete" data-action="delete" data-id="${item.id}">DEL</button></div>
+      <div class="card-actions"><button class="small-button" type="button" data-action="test" data-id="${item.id}" ${canTest ? '' : 'disabled'}>${checkLabel}</button><button class="small-button" type="button" data-action="copy-name" data-id="${item.id}" title="${localized('复制 KRU MCP 使用提示', 'Copy KRU MCP use prompt')}" aria-label="${localized('复制 KRU MCP 使用提示', 'Copy KRU MCP use prompt')}">USE</button><button class="small-button" type="button" data-action="edit" data-id="${item.id}">EDIT</button><button class="small-button delete" type="button" data-action="delete" data-id="${item.id}">DEL</button></div>
     </article>`;
   }).join('');
   requestAnimationFrame(() => {
@@ -643,13 +686,10 @@ function renderSettings() {
   mcpStrip.className = `status-strip ${mcpFault ? 'error' : ''}`;
   mcpStrip.innerHTML = `<span class="status-dot"></span><span class="status-key">${mcpFault ? 'FAULT' : 'READY'}</span><span>${mcpFault ? escapeHtml(publicMessage(state.mcp.error)) : localized('Agent 使用时自动启动 stdio，无需常驻服务。', 'stdio starts on demand. No background service.')}</span>`;
   $('#agent-restart-notice').classList.toggle('hidden', !agentRestartRequired);
-  const approvalOn = Boolean(state.settings.approvalMode);
-  $('#approval-enabled').checked = approvalOn;
+  $('#desktop-shortcut-enabled').checked = Boolean(systemIntegrationState.desktopShortcut);
+  $('#launch-at-login-enabled').checked = Boolean(systemIntegrationState.launchAtLogin);
+  $('#pin-enabled').checked = ownerLockState.pinConfigured || ownerPinSetupRequested;
   $('#close-behavior').value = state.settings.closeBehavior === 'exit' ? 'exit' : 'tray';
-  $('#system-approval-popup').checked = Boolean(state.settings.systemApprovalPopup);
-  const approvalStrip = $('#approval-status-strip');
-  approvalStrip.className = `status-strip ${approvalOn ? '' : 'offline'}`;
-  approvalStrip.innerHTML = `<span class="status-dot"></span><span class="status-key">${approvalOn ? 'ARMED' : 'OFF'}</span><span>${approvalOn ? localized('每次秘密调用等待本机确认。', 'Every secret call waits for local approval.') : localized('按项目已保存权限直接执行。', 'Calls run under each item’s saved permissions.')}</span>`;
   $('#browser-enabled').checked = state.settings.browserEnabled;
   $('#browser-port').value = state.settings.browserPort;
   const bridge = state.browserBridge;
@@ -660,61 +700,13 @@ function renderSettings() {
   $('#reset-pairing-button').disabled = !bridge.paired;
   renderAgents();
   applySettingsSearch();
-  renderApprovalRequest();
 }
 
-function renderApprovalRequest() {
-  const request = state?.settings?.approvalMode ? pendingApprovals[0] : null;
-  const strip = $('#approval-status-strip');
-  if (strip && state?.settings?.approvalMode) {
-    strip.className = `status-strip ${request ? 'waiting' : ''}`;
-    strip.innerHTML = `<span class="status-dot"></span><span class="status-key">${request ? 'WAIT' : 'ARMED'}</span><span>${request ? localized(`${pendingApprovals.length} 条调用等待审核。`, `${pendingApprovals.length} call(s) waiting for approval.`) : localized('每次秘密调用等待本机确认。', 'Every secret call waits for local approval.')}</span>`;
-  }
-  $('#approval-modal').classList.toggle('hidden', !request);
-  document.title = request ? 'KRU · APPROVAL' : 'KRU';
-  if (!request) return;
-  $('#approval-summary').textContent = localized(
-    `${request.source} 正在请求 KRU 使用一个已保存秘密。`,
-    `${request.source} is asking KRU to use a saved secret.`,
-  );
-  $('#approval-source').textContent = request.source;
-  $('#approval-item').textContent = request.itemName;
-  $('#approval-action').textContent = request.action;
-  $('#approval-detail').textContent = request.detail || '—';
-  $('#approval-queue').textContent = pendingApprovals.length > 1
-    ? localized(`另有 ${pendingApprovals.length - 1} 条等待审核`, `${pendingApprovals.length - 1} MORE WAITING`)
-    : localized('只允许当前这一次调用', 'THIS CALL ONLY');
-}
-
-async function refreshApprovals() {
-  if (approvalRefreshBusy || !state?.settings?.approvalMode || !ownerLockState.unlocked) {
-    if (!state?.settings?.approvalMode || !ownerLockState.unlocked) {
-      pendingApprovals = [];
-      renderApprovalRequest();
-    }
-    return;
-  }
-  approvalRefreshBusy = true;
-  try {
-    pendingApprovals = await api.approvals();
-    if (pendingApprovals[0] && pendingApprovals[0].id !== lastApprovalNotifiedId) {
-      lastApprovalNotifiedId = pendingApprovals[0].id;
-      api.window('attention').catch(() => {});
-    }
-    renderApprovalRequest();
-  } catch (_) {
-    pendingApprovals = [];
-    renderApprovalRequest();
-  } finally {
-    approvalRefreshBusy = false;
-  }
-}
-
-const agentLabels = { notDetected: 'NOT FOUND', available: 'READY', registered: 'CONNECTED', stale: 'PATH CHANGED', conflict: 'CONFLICT', error: 'ERROR' };
+const agentLabels = { notDetected: 'NOT FOUND', available: 'READY', registered: 'CONNECTED', stale: 'NEEDS REPAIR', conflict: 'CONFLICT', error: 'ERROR' };
 function agentDetail(client) {
   const details = language === 'en'
-    ? { notDetected: 'Not installed', available: 'Ready to connect', registered: 'Connected', stale: 'KRU path changed', conflict: 'Config conflict', error: 'Detection failed' }
-    : { notDetected: '未安装或未发现', available: '可连接', registered: '已连接', stale: 'KRU 路径已变更', conflict: '配置冲突', error: '检测失败' };
+    ? { notDetected: 'Not installed', available: 'Ready to connect', registered: 'Connected', stale: 'KRU setup needs repair', conflict: 'Config conflict', error: 'Detection failed' }
+    : { notDetected: '未安装或未发现', available: '可连接', registered: '已连接', stale: 'KRU 连接或全局规则需要修复', conflict: '配置冲突', error: '检测失败' };
   return details[client.state] || publicMessage(client.message, localized('状态已更新', 'Status updated'));
 }
 function renderAgents() {
@@ -727,6 +719,7 @@ async function scanAgents(showToast = false) {
   try {
     agentClients = await api.agents();
     renderAgents();
+    if (state) renderMetrics();
     if (showToast) toast(localized('Agent 扫描完成', 'Agent scan complete'));
   } catch (error) { toast(cleanError(error), 'error'); }
 }
@@ -777,25 +770,9 @@ function moduleConfigured(module) {
   return Boolean(module && (String(module.secretValue || '').length || module.configured || module.pending));
 }
 
-function deriveEditorActions() {
-  const actions = [];
-  if (currentModules.some((module) => MODULE_DEFS[module.kind]?.secret && moduleConfigured(module))) actions.push('FILL');
-  const host = editorModule('host');
-  const port = editorModule('port');
-  if (String(host?.value || '').trim() && Number(port?.value) > 0 && moduleConfigured(editorModule('username')) && (moduleConfigured(editorModule('password')) || moduleConfigured(editorModule('privateKey')))) actions.push('SSH');
-  if (moduleConfigured(editorModule('apiCredential'))) actions.push('HTTP');
-  return actions;
-}
-
 function updateModuleStatus() {
   syncModuleDraft();
-  const actions = deriveEditorActions();
-  $('#derived-actions').innerHTML = (actions.length ? actions : ['DRAFT']).map((action) => `<b class="${action === 'DRAFT' ? 'draft' : ''}">${action}</b>`).join('');
-  $('#derived-help').textContent = actions.length
-    ? localized('仅这些已完成组合会向 Agent 开放。', 'Only these complete combinations are exposed to agents.')
-    : localized('可以保存草稿；尚不会向 Agent 暴露。', 'This draft can be saved and is not exposed to agents yet.');
   $('#ssh-options').classList.toggle('hidden', !currentModules.some((module) => ['host', 'port', 'privateKey'].includes(module.kind)));
-  $('#allowed-commands-field').classList.toggle('hidden', $('#ssh-security-mode').value !== 'restricted');
 }
 
 function renderModules() {
@@ -977,7 +954,7 @@ async function openEditor(item = null, draft = null) {
           return { ...module, secretValue: ownerValues[secretName] || '', configured: Boolean(ownerValues[secretName]), existing: false, privateKeyName: module.kind === 'privateKey' ? draft.input?.secrets?.privateKeyName || '' : '', pending: false, agentVisible: typeof module.agentVisible === 'boolean' ? module.agentVisible : !MODULE_DEFS[module.kind]?.secret };
         })
       : [];
-  value('#ssh-security-mode', source?.securityMode || 'readonly'); value('#ssh-fingerprint', item?.hostFingerprint); value('#ssh-allowed-commands', (source?.allowedCommands || []).join('\n'));
+  value('#ssh-fingerprint', item?.hostFingerprint);
   $('#reset-ssh-trust').classList.toggle('hidden', !(itemCapabilities(item || {}).includes('ssh') && item?.hostFingerprint));
   renderModules();
   $('#connection-modal').classList.remove('hidden');
@@ -1015,11 +992,15 @@ function collectModules(validate = true) {
 function serializeItem(validate = true) {
   const name = value('#connection-name').trim();
   if (validate && !name) throw new Error(localized('请输入项目名称', 'Enter an item name'));
+  const id = value('#connection-id') || null;
+  if (validate && state.connections.some((item) => item.id !== id && item.name.trim().toLowerCase() === name.toLowerCase())) {
+    throw new Error(localized('项目名称已存在，请使用其他名称', 'An item with this name already exists'));
+  }
   syncModuleDraft();
   if (validate && !currentModules.length) throw new Error(localized('请至少添加一个模块', 'Add at least one module'));
   const collected = collectModules(validate);
   return {
-    id: value('#connection-id') || null,
+    id,
     modules: collected.modules,
     name,
     description: value('#connection-description'),
@@ -1028,8 +1009,6 @@ function serializeItem(validate = true) {
     sshAuthType: '',
     httpAuthType: 'auto',
     privateKeyImportPath: collected.privateKeyImportPath,
-    securityMode: value('#ssh-security-mode'),
-    allowedCommands: value('#ssh-allowed-commands').split('\n').map((line) => line.trim()).filter(Boolean),
     removeSecretNames: [...removedSecretFields],
     secrets: collected.secrets,
   };
@@ -1062,26 +1041,9 @@ async function closeEditorWithDraft() {
 
 async function saveBrowserSettings() {
   try {
-    await api.settings({ ...state.settings, language, browserEnabled: $('#browser-enabled').checked, browserPort: Number($('#browser-port').value) });
+    state.settings = await api.settings({ browserEnabled: $('#browser-enabled').checked, browserPort: Number($('#browser-port').value) });
     toast(localized('Browser Bridge 设置已保存', 'Browser Bridge settings saved'));
     await refresh();
-  } catch (error) {
-    toast(cleanError(error), 'error');
-    await refresh(false);
-  }
-}
-
-async function saveApprovalSettings() {
-  const enabled = $('#approval-enabled').checked;
-  try {
-    state.settings = await api.settings({ ...state.settings, language, approvalMode: enabled });
-    if (!enabled) pendingApprovals = [];
-    renderMetrics();
-    renderSettings();
-    toast(enabled
-      ? localized('审核模式已开启', 'Approval mode enabled')
-      : localized('审核模式已关闭', 'Approval mode disabled'));
-    await refreshApprovals();
   } catch (error) {
     toast(cleanError(error), 'error');
     await refresh(false);
@@ -1091,41 +1053,62 @@ async function saveApprovalSettings() {
 async function saveDesktopSettings() {
   try {
     state.settings = await api.settings({
-      ...state.settings,
-      language,
       closeBehavior: $('#close-behavior').value,
-      systemApprovalPopup: $('#system-approval-popup').checked,
     });
     renderSettings();
-    toast(localized('窗口与提醒设置已保存', 'Window and alert settings saved'));
+    toast(localized('窗口设置已保存', 'Window settings saved'));
   } catch (error) {
     toast(cleanError(error), 'error');
     await refresh(false);
   }
 }
 
-async function resolveCurrentApproval(approved) {
-  const request = pendingApprovals[0];
-  if (!request) return;
-  const buttons = [$('#approval-deny'), $('#approval-allow')];
-  buttons.forEach((button) => { button.disabled = true; });
+async function setSystemIntegration(kind, enabled) {
+  const input = kind === 'desktop' ? $('#desktop-shortcut-enabled') : $('#launch-at-login-enabled');
+  input.disabled = true;
   try {
-    await api.resolveApproval(request.id, approved);
-    api.window('attention-clear').catch(() => {});
-    pendingApprovals = pendingApprovals.filter((candidate) => candidate.id !== request.id);
-    renderApprovalRequest();
-    const desktopFill = approved && request.detail.toLowerCase().startsWith('desktop');
-    toast(approved
-      ? desktopFill
-        ? localized('已允许 · 请在 5 秒内切回目标输入框', 'Approved · Return to the target field within 5 seconds')
-        : localized('已允许本次调用', 'Call approved')
-      : localized('已拒绝本次调用', 'Call denied'));
-    await refreshApprovals();
+    systemIntegrationState = kind === 'desktop'
+      ? await api.setDesktopShortcut(enabled)
+      : await api.setLaunchAtLogin(enabled);
+    renderSettings();
+    toast(kind === 'desktop'
+      ? (enabled ? localized('桌面快捷方式已创建', 'Desktop shortcut created') : localized('桌面快捷方式已移除', 'Desktop shortcut removed'))
+      : (enabled ? localized('开机自启动已开启', 'Launch at login enabled') : localized('开机自启动已关闭', 'Launch at login disabled')));
+  } catch (error) {
+    input.checked = kind === 'desktop'
+      ? Boolean(systemIntegrationState.desktopShortcut)
+      : Boolean(systemIntegrationState.launchAtLogin);
+    toast(cleanError(error), 'error');
+  } finally {
+    input.disabled = false;
+  }
+}
+
+async function savePinSettings() {
+  const toggle = $('#pin-enabled');
+  if (toggle.checked) {
+    ownerPinSetupRequested = true;
+    renderOwnerLock();
+    return;
+  }
+  if (!confirm(localized('关闭 PIN 锁会移除当前 PIN。继续？', 'Turning off the PIN lock removes the current PIN. Continue?'))) {
+    toggle.checked = true;
+    return;
+  }
+  toggle.disabled = true;
+  try {
+    ownerLockState = await api.ownerDisablePin();
+    ownerPinSetupRequested = false;
+    renderOwnerLock();
+    renderMetrics();
+    renderSettings();
+    toast(localized('PIN 锁已关闭', 'PIN lock disabled'));
   } catch (error) {
     toast(cleanError(error), 'error');
-    await refreshApprovals();
+    await refreshOwnerLock(false);
+    renderSettings();
   } finally {
-    buttons.forEach((button) => { button.disabled = false; });
+    toggle.disabled = false;
   }
 }
 
@@ -1144,28 +1127,60 @@ async function setLanguage(next) {
       $('#modal-title').textContent = value('#connection-id') ? localized('编辑项目', 'EDIT ITEM') : currentDraftId ? localized('继续草稿', 'CONTINUE DRAFT') : localized('添加项目', 'ADD ITEM');
     }
     if (!$('#backup-modal').classList.contains('hidden')) {
-      $('#backup-title').textContent = backupMode === 'export' ? localized('导出便携备份', 'EXPORT PORTABLE BACKUP') : localized('导入便携备份', 'IMPORT PORTABLE BACKUP');
-      $('#backup-description').textContent = backupMode === 'export'
-        ? localized('使用独立密码加密，可在 Windows、macOS 与 Linux 间迁移。', 'Encrypted with a separate password for transfer across Windows, macOS, and Linux.')
-        : localized('同 UUID 覆盖，不同 UUID 追加。', 'Matching UUIDs are replaced; new UUIDs are appended.');
+      renderLegacyBackupModalCopy();
     }
     try {
-      state.settings = await api.settings({ ...state.settings, language });
+      state.settings = await api.settings({ language });
     } catch (error) {
       toast(cleanError(error), 'error');
     }
   }
 }
 
-function openBackup(mode) {
-  backupMode = mode;
-  $('#backup-title').textContent = mode === 'export' ? localized('导出便携备份', 'EXPORT PORTABLE BACKUP') : localized('导入便携备份', 'IMPORT PORTABLE BACKUP');
-  $('#backup-description').textContent = mode === 'export'
-    ? localized('使用独立密码加密，可在 Windows、macOS 与 Linux 间迁移。', 'Encrypted with a separate password for transfer across Windows, macOS, and Linux.')
-    : localized('同 UUID 覆盖，不同 UUID 追加。', 'Matching UUIDs are replaced; new UUIDs are appended.');
-  $('#backup-confirm-field').classList.toggle('hidden', mode !== 'export');
-  value('#backup-password', ''); value('#backup-password-confirm', '');
+function renderLegacyBackupModalCopy() {
+  $('#backup-title').textContent = localized('导入旧版备份', 'IMPORT LEGACY BACKUP');
+  $('#backup-description').textContent = localized('这个备份由旧版 KRU 使用独立密码加密。输入当时设置的密码以继续导入。', 'This backup was encrypted by an older KRU version with a separate password. Enter that password to continue.');
+}
+
+function openLegacyBackupPassword() {
+  renderLegacyBackupModalCopy();
+  value('#backup-password', '');
   $('#backup-modal').classList.remove('hidden');
+  requestAnimationFrame(() => $('#backup-password').focus());
+}
+
+function toastImportSummary(summary) {
+  toast(localized(`导入完成：新增 ${summary.added}，合并重复 ${summary.merged}`, `Import complete: ${summary.added} added, ${summary.merged} duplicates merged`));
+}
+
+async function exportBackup(button) {
+  button.disabled = true;
+  try {
+    const path = await api.exportBackup();
+    if (path) toast(localized('备份已导出，可由 KRU 自动解密导入', 'Backup exported and ready for automatic KRU import'));
+  } catch (error) {
+    toast(cleanError(error), 'error');
+  } finally {
+    button.disabled = false;
+  }
+}
+
+async function importBackup(button) {
+  button.disabled = true;
+  try {
+    const result = await api.importBackup();
+    if (!result) return;
+    if (result.legacyPasswordRequired) {
+      openLegacyBackupPassword();
+      return;
+    }
+    toastImportSummary(result.summary);
+    await refresh();
+  } catch (error) {
+    toast(cleanError(error), 'error');
+  } finally {
+    button.disabled = false;
+  }
 }
 
 document.addEventListener('click', async (event) => {
@@ -1294,6 +1309,12 @@ document.addEventListener('click', async (event) => {
       } catch (error) { toast(cleanError(error), 'error'); }
     }
     if (action.dataset.action === 'edit') await openEditor(item);
+    if (action.dataset.action === 'copy-name') {
+      try {
+        await api.copyOwnerValue(`use ${item.name} in KRU MCP`);
+        toast(localized('KRU MCP 使用提示已复制', 'KRU MCP use prompt copied'));
+      } catch (error) { toast(cleanError(error), 'error'); }
+    }
     if (action.dataset.action === 'test') {
       try { toast(publicMessage(await api.test(item.id), localized('连接测试完成', 'Connection test complete'))); await refresh(false); } catch (error) { toast(cleanError(error), 'error'); }
     }
@@ -1384,7 +1405,7 @@ document.addEventListener('keydown', (event) => {
     if (event.key === 'ArrowLeft' && index > 0) { event.preventDefault(); inputs[index - 1].focus(); return; }
     if (event.key === 'ArrowRight' && index < inputs.length - 1) { event.preventDefault(); inputs[index + 1].focus(); return; }
   }
-  const pageSearchAvailable = $('#connection-modal').classList.contains('hidden') && $('#backup-modal').classList.contains('hidden') && $('#approval-modal').classList.contains('hidden') && $('#owner-lock-layer').classList.contains('hidden');
+  const pageSearchAvailable = $('#connection-modal').classList.contains('hidden') && $('#backup-modal').classList.contains('hidden') && $('#owner-lock-layer').classList.contains('hidden');
   if (pageSearchAvailable && (event.ctrlKey || event.metaKey) && event.key.toLowerCase() === 'f' && !event.altKey) {
     event.preventDefault();
     const search = $(`[data-page-search="${activePage}"]`);
@@ -1433,42 +1454,66 @@ $('#owner-lock-form').addEventListener('submit', async (event) => {
   if (!/^\d{6}$/.test(pin)) return toast(localized('PIN 必须是六位数字', 'PIN must contain six digits'), 'error');
   if (!ownerLockState.pinConfigured && pin !== readPin('owner-pin-confirm')) return toast(localized('两次 PIN 不一致', 'PIN entries do not match'), 'error');
   const button = $('#owner-unlock-action');
+  const cancelButton = $('#owner-pin-cancel');
   button.disabled = true;
+  cancelButton.disabled = true;
   try {
+    const settingPin = !ownerLockState.pinConfigured;
     ownerLockState = ownerLockState.pinConfigured ? await api.ownerUnlock(pin) : await api.ownerSetPin(pin);
+    ownerPinSetupRequested = false;
     lastOwnerActivity = Date.now();
     renderOwnerLock();
+    if (state) {
+      renderMetrics();
+      renderSettings();
+    }
+    if (settingPin) toast(localized('PIN 锁已开启', 'PIN lock enabled'));
     await refreshDrafts(true);
-    await refreshApprovals();
   } catch (error) {
     toast(cleanError(error), 'error');
     clearPin('owner-pin');
     focusPin('owner-pin');
-  } finally { button.disabled = false; }
+  } finally {
+    button.disabled = false;
+    cancelButton.disabled = false;
+  }
 });
-$('#ssh-security-mode').addEventListener('change', updateAuthFields);
+$('#owner-pin-cancel').addEventListener('click', () => {
+  ownerPinSetupRequested = false;
+  renderOwnerLock();
+  renderSettings();
+});
 $('#reset-ssh-trust').addEventListener('click', async () => { const id = value('#connection-id'); if (!id || !confirm(localized('重置后，下次连接将固定新的服务器指纹。继续？', 'After reset, the next connection will pin a new server fingerprint. Continue?'))) return; try { await api.resetTrust(id); value('#ssh-fingerprint', ''); $('#reset-ssh-trust').classList.add('hidden'); toast(localized('SSH 主机信任已重置', 'SSH host trust reset')); } catch (error) { toast(cleanError(error), 'error'); } });
 $('#clear-activity-button').addEventListener('click', async () => { if (!confirm(localized('清空本地操作记录？', 'Clear the local activity log?'))) return; await api.clear(); currentActivityFilter = 'all'; pageSearch.activity = ''; expandedActivityErrors.clear(); $('[data-page-search="activity"]').value = ''; await refresh(); });
 $('#save-browser-settings-button').addEventListener('click', saveBrowserSettings);
 $('#browser-enabled').addEventListener('change', saveBrowserSettings);
-$('#approval-enabled').addEventListener('change', saveApprovalSettings);
+if (!isMacOS) $('#desktop-shortcut-enabled').addEventListener('change', (event) => setSystemIntegration('desktop', event.currentTarget.checked));
+$('#launch-at-login-enabled').addEventListener('change', (event) => setSystemIntegration('startup', event.currentTarget.checked));
+$('#pin-enabled').addEventListener('change', savePinSettings);
 $('#close-behavior').addEventListener('change', saveDesktopSettings);
-$('#system-approval-popup').addEventListener('change', saveDesktopSettings);
-$('#approval-deny').addEventListener('click', () => resolveCurrentApproval(false));
-$('#approval-allow').addEventListener('click', () => resolveCurrentApproval(true));
 $('#quick-pairing-button').addEventListener('click', async () => { try { const message = await api.quickPair(Number($('#browser-port').value)); $('#browser-enabled').checked = true; toast(publicMessage(message, localized('浏览器配对已准备', 'Browser pairing is ready'))); await refresh(); } catch (error) { toast(cleanError(error), 'error'); } });
 $('#reset-pairing-button').addEventListener('click', async () => { if (!confirm(localized('重置后所有已配对扩展会立即失效。继续？', 'Resetting immediately revokes every paired extension. Continue?'))) return; try { await api.resetPair(); toast(localized('配对已重置', 'Pairing reset')); await refresh(); } catch (error) { toast(cleanError(error), 'error'); } });
 $('#open-extension-button').addEventListener('click', () => api.extensionFolder().catch((error) => toast(cleanError(error), 'error')));
 $('#open-data-button').addEventListener('click', () => api.dataFolder().catch((error) => toast(cleanError(error), 'error')));
 $('#rescan-agents').addEventListener('click', () => scanAgents(true));
-$('#header-export-backup-button').addEventListener('click', () => openBackup('export'));
-$('#header-import-backup-button').addEventListener('click', () => openBackup('import'));
+$('#header-export-backup-button').addEventListener('click', (event) => exportBackup(event.currentTarget));
+$('#header-import-backup-button').addEventListener('click', (event) => importBackup(event.currentTarget));
 $('#backup-cancel').addEventListener('click', () => $('#backup-modal').classList.add('hidden'));
 $('#backup-action').addEventListener('click', async () => {
   const password = value('#backup-password');
-  if (password.length < 8) return toast(localized('备份密码至少 8 位', 'Backup password must be at least 8 characters'), 'error');
-  if (backupMode === 'export' && password !== value('#backup-password-confirm')) return toast(localized('两次密码不一致', 'Password entries do not match'), 'error');
-  try { const result = backupMode === 'export' ? await api.exportBackup(password) : await api.importBackup(password); if (result) { $('#backup-modal').classList.add('hidden'); toast(backupMode === 'export' ? localized('备份已导出', 'Backup exported') : localized(`导入完成：新增 ${result.added}，更新 ${result.updated}`, `Import complete: ${result.added} added, ${result.updated} updated`)); await refresh(); } } catch (error) { toast(cleanError(error), 'error'); }
+  if (password.length < 8) return toast(localized('旧版备份密码至少 8 位', 'Legacy backup password must be at least 8 characters'), 'error');
+  const button = $('#backup-action');
+  button.disabled = true;
+  try {
+    const summary = await api.importLegacyBackup(password);
+    $('#backup-modal').classList.add('hidden');
+    toastImportSummary(summary);
+    await refresh();
+  } catch (error) {
+    toast(cleanError(error), 'error');
+  } finally {
+    button.disabled = false;
+  }
 });
 
 $('#page-activity .activity-panel').addEventListener('scroll', (event) => {
@@ -1476,15 +1521,21 @@ $('#page-activity .activity-panel').addEventListener('scroll', (event) => {
   if (panel.scrollHeight - panel.scrollTop - panel.clientHeight < 160) queueMoreActivities();
 }, { passive: true });
 
-window.__TAURI__.event.listen('state-changed', async () => { await refresh(false); await refreshDrafts(); await refreshApprovals(); });
-window.addEventListener('focus', async () => { await refresh(false); await refreshOwnerLock(false); await refreshDrafts(); await refreshApprovals(); });
+window.__TAURI__.event.listen('state-changed', async () => { await refresh(false); await refreshDrafts(); });
+window.__TAURI__.event.listen('pin-setup-requested', async () => {
+  await refreshOwnerLock(false);
+  if (ownerLockState.pinConfigured) return;
+  ownerPinSetupRequested = true;
+  renderOwnerLock();
+  if (state) renderSettings();
+});
+window.addEventListener('focus', async () => { await refresh(false); await refreshOwnerLock(false); await refreshDrafts(); });
 window.addEventListener('resize', positionModuleMenu);
 $('.form-scroll', $('#connection-modal')).addEventListener('scroll', positionModuleMenu, { passive: true });
-for (const eventName of ['pointerdown', 'keydown']) document.addEventListener(eventName, () => { if (ownerLockState.unlocked) lastOwnerActivity = Date.now(); }, { passive: true });
+for (const eventName of ['pointerdown', 'keydown']) document.addEventListener(eventName, () => { if (ownerLockState.pinConfigured && ownerLockState.unlocked) lastOwnerActivity = Date.now(); }, { passive: true });
 setInterval(() => { if ($('#page-activity').classList.contains('active')) refresh(false); }, 2000);
-setInterval(refreshApprovals, 750);
 setInterval(async () => {
-  if (!ownerLockState.unlocked) return;
+  if (!ownerLockState.pinConfigured || !ownerLockState.unlocked) return;
   try {
     ownerLockState = Date.now() - lastOwnerActivity < 45_000 ? await api.ownerTouch() : await api.ownerStatus();
     if (!ownerLockState.unlocked) renderOwnerLock();
@@ -1497,7 +1548,6 @@ async function bootstrap() {
   await refreshOwnerLock();
   await refresh();
   await refreshDrafts();
-  await refreshApprovals();
   scanAgents();
   queueScrollThumbSync();
 }

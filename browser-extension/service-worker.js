@@ -1,6 +1,10 @@
 let socket;
 let reconnectTimer;
+let heartbeatTimer;
+let connectTask;
+let forceReconnectAfterCurrent = false;
 const focusedFrameByTab = new Map();
+const JOB_TIMEOUT_MS = 35_000;
 
 chrome.runtime.onMessage.addListener((message, sender) => {
   if (message?.type === "kru-focus" && sender.tab?.id != null) {
@@ -8,12 +12,15 @@ chrome.runtime.onMessage.addListener((message, sender) => {
     return;
   }
   if (message?.type === "bridge-config-updated") {
-    connect();
+    requestConnect({ force: true });
   }
 });
 
 chrome.tabs.onRemoved.addListener((tabId) => focusedFrameByTab.delete(tabId));
-chrome.tabs.onActivated.addListener(() => connect());
+chrome.tabs.onActivated.addListener(() => announceActive());
+chrome.windows.onFocusChanged.addListener((windowId) => {
+  if (windowId !== chrome.windows.WINDOW_ID_NONE) announceActive();
+});
 
 async function setStatus(status, detail) {
   await chrome.storage.local.set({ bridgeStatus: status, bridgeDetail: detail });
@@ -21,7 +28,89 @@ async function setStatus(status, detail) {
 
 function reconnectAfter(delay = 1500) {
   clearTimeout(reconnectTimer);
-  reconnectTimer = setTimeout(connect, delay);
+  reconnectTimer = setTimeout(requestConnect, delay);
+}
+
+function socketIsLive() {
+  return socket &&
+    (socket.readyState === WebSocket.CONNECTING || socket.readyState === WebSocket.OPEN);
+}
+
+function announceActive() {
+  if (socket?.readyState !== WebSocket.OPEN) {
+    requestConnect();
+    return;
+  }
+  try {
+    socket.send(JSON.stringify({ type: "activate" }));
+  } catch {
+    handleDisconnect(socket);
+  }
+}
+
+async function announceIfFocused() {
+  try {
+    const window = await chrome.windows.getLastFocused();
+    if (window?.focused) announceActive();
+  } catch {
+    // The next tab/window activation will update the active extension.
+  }
+}
+
+function requestConnect({ force = false } = {}) {
+  if (!force && socketIsLive()) return connectTask || Promise.resolve();
+  if (connectTask) {
+    if (force) forceReconnectAfterCurrent = true;
+    return connectTask;
+  }
+  connectTask = (async () => {
+    let forceCurrent = force;
+    do {
+      forceReconnectAfterCurrent = false;
+      await connectOnce(forceCurrent);
+      forceCurrent = forceReconnectAfterCurrent;
+    } while (forceCurrent);
+  })().finally(() => {
+    connectTask = null;
+  });
+  return connectTask;
+}
+
+function disposeSocket(ws, close = false) {
+  if (socket !== ws) return false;
+  socket = null;
+  clearInterval(heartbeatTimer);
+  heartbeatTimer = null;
+  ws.onopen = null;
+  ws.onmessage = null;
+  ws.onerror = null;
+  ws.onclose = null;
+  if (close && (ws.readyState === WebSocket.CONNECTING || ws.readyState === WebSocket.OPEN)) {
+    ws.close();
+  }
+  return true;
+}
+
+async function handleDisconnect(ws) {
+  if (!disposeSocket(ws, true)) return;
+  const { bridgePort = 39272 } = await chrome.storage.local.get("bridgePort");
+  await setStatus("disconnected", `127.0.0.1:${bridgePort}`);
+  reconnectAfter();
+}
+
+function startHeartbeat(ws) {
+  clearInterval(heartbeatTimer);
+  heartbeatTimer = setInterval(() => {
+    if (socket === ws && ws.readyState === WebSocket.OPEN) {
+      try {
+        ws.send(JSON.stringify({ type: "ping" }));
+      } catch {
+        handleDisconnect(ws);
+      }
+    } else {
+      handleDisconnect(ws);
+    }
+  }, 20000);
 }
 
 async function claimPairing(port) {
@@ -37,12 +126,11 @@ async function claimPairing(port) {
   }
 }
 
-async function connect() {
+async function connectOnce(force = false) {
   clearTimeout(reconnectTimer);
+  if (!force && socketIsLive()) return;
   if (socket) {
-    socket.onclose = null;
-    socket.close();
-    socket = null;
+    disposeSocket(socket, true);
   }
   const { bridgePort = 39272, bridgeToken = "" } = await chrome.storage.local.get([
     "bridgePort",
@@ -70,16 +158,23 @@ async function connect() {
     }
     if (message.type === "ready") {
       await setStatus("connected", `127.0.0.1:${bridgePort}`);
+      startHeartbeat(ws);
+      await announceIfFocused();
       return;
     }
+    if (message.type === "pong") return;
     if (message.type === "auth-error") {
       await chrome.storage.local.remove("bridgeToken");
       await setStatus("waiting", `127.0.0.1:${bridgePort}`);
-      ws.close();
+      disposeSocket(ws, true);
+      reconnectAfter();
       return;
     }
     if (message.type === "job") {
-      const result = await fillFocused(message.job?.value);
+      const expiresAt = jobExpiresAt(message.job);
+      const result = Number.isFinite(expiresAt) && Date.now() >= expiresAt
+        ? { ok: false, message: "填写任务已过期" }
+        : await fillFocused(message.job?.value, expiresAt);
       if (ws.readyState === WebSocket.OPEN) {
         ws.send(JSON.stringify({
           type: "complete",
@@ -90,16 +185,19 @@ async function connect() {
       }
     }
   };
-  ws.onerror = () => {};
-  ws.onclose = async () => {
-    if (socket !== ws) return;
-    socket = null;
-    await setStatus("disconnected", `127.0.0.1:${bridgePort}`);
-    reconnectAfter();
-  };
+  ws.onerror = () => handleDisconnect(ws);
+  ws.onclose = () => handleDisconnect(ws);
 }
 
-async function fillFocused(value) {
+function jobExpiresAt(job, now = Date.now()) {
+  const raw = job?.expiresAt ?? job?.expires_at;
+  const latest = now + JOB_TIMEOUT_MS;
+  if (raw === undefined || raw === null) return latest;
+  const parsed = Number(raw);
+  return Number.isFinite(parsed) ? Math.min(parsed, latest) : latest;
+}
+
+async function fillFocused(value, expiresAt) {
   if (typeof value !== "string") return { ok: false, message: "填写内容无效" };
   const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
   if (!tab?.id) return { ok: false, message: "没有活动标签页" };
@@ -108,7 +206,7 @@ async function fillFocused(value) {
     const [execution] = await chrome.scripting.executeScript({
       target: { tabId: tab.id, frameIds: [frameId] },
       func: writeToFocusedControl,
-      args: [value],
+      args: [value, expiresAt],
     });
     return execution?.result || { ok: false, message: "页面没有返回填写结果" };
   } catch {
@@ -116,8 +214,16 @@ async function fillFocused(value) {
   }
 }
 
-function writeToFocusedControl(value) {
-  const element = document.activeElement;
+function writeToFocusedControl(value, expiresAt) {
+  if (Number.isFinite(expiresAt) && Date.now() >= expiresAt) {
+    return { ok: false, message: "填写任务已过期" };
+  }
+  const findActiveElement = (root) => {
+    const element = root.activeElement;
+    const shadowRoot = element?.shadowRoot;
+    return shadowRoot?.activeElement ? findActiveElement(shadowRoot) : element;
+  };
+  const element = findActiveElement(document);
   if (!element || element === document.body || element === document.documentElement) {
     return { ok: false, message: "当前页面没有聚焦的可输入控件" };
   }
@@ -149,4 +255,4 @@ function writeToFocusedControl(value) {
   }
 }
 
-connect();
+requestConnect();

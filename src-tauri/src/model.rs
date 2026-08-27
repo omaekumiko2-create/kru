@@ -24,22 +24,27 @@ pub struct OwnerPinVerifier {
 #[serde(default)]
 pub struct Settings {
     pub language: String,
-    pub approval_mode: bool,
     pub close_behavior: String,
-    pub system_approval_popup: bool,
     pub browser_enabled: bool,
     pub browser_port: u16,
     pub browser_paired: bool,
     pub agent_mcp_onboarding_version: u8,
 }
 
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SettingsPatch {
+    pub language: Option<String>,
+    pub close_behavior: Option<String>,
+    pub browser_enabled: Option<bool>,
+    pub browser_port: Option<u16>,
+}
+
 impl Default for Settings {
     fn default() -> Self {
         Self {
             language: "zh".to_owned(),
-            approval_mode: false,
             close_behavior: "tray".to_owned(),
-            system_approval_popup: false,
             browser_enabled: false,
             browser_port: 39_272,
             browser_paired: false,
@@ -60,23 +65,8 @@ mod settings_tests {
         .unwrap();
         assert_eq!(settings.agent_mcp_onboarding_version, 0);
         assert_eq!(settings.language, "zh");
-        assert!(!settings.approval_mode);
         assert_eq!(settings.close_behavior, "tray");
-        assert!(!settings.system_approval_popup);
     }
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct ApprovalRequest {
-    pub id: Uuid,
-    pub created_at: String,
-    pub status: String,
-    pub source: String,
-    pub item_id: Uuid,
-    pub item_name: String,
-    pub action: String,
-    pub detail: String,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -439,10 +429,6 @@ pub struct StoredConnection {
     pub host_fingerprint_host: String,
     #[serde(default)]
     pub host_fingerprint_port: u16,
-    #[serde(default)]
-    pub security_mode: String,
-    #[serde(default)]
-    pub allowed_commands: Vec<String>,
 
     #[serde(default)]
     pub base_url: String,
@@ -509,8 +495,6 @@ pub struct PublicConnection {
     pub private_key_name: String,
     pub has_private_key: bool,
     pub host_fingerprint: String,
-    pub security_mode: String,
-    pub allowed_commands: Vec<String>,
     pub base_url: String,
     pub auth_header: String,
     #[serde(default)]
@@ -591,8 +575,6 @@ impl StoredConnection {
             private_key_name: self.private_key_name.clone(),
             has_private_key: secrets.and_then(|s| s.private_key.as_ref()).is_some(),
             host_fingerprint: self.host_fingerprint.clone(),
-            security_mode: self.security_mode.clone(),
-            allowed_commands: self.allowed_commands.clone(),
             base_url: self.base_url.clone(),
             auth_header: self.auth_header.clone(),
             auth_location: self.auth_location.clone(),
@@ -686,10 +668,6 @@ pub struct ConnectionInput {
     // deliberately ignores client-supplied trust material.
     #[serde(default)]
     pub host_fingerprint: String,
-    #[serde(default)]
-    pub security_mode: String,
-    #[serde(default)]
-    pub allowed_commands: Vec<String>,
 
     #[serde(default)]
     pub base_url: String,
@@ -766,8 +744,6 @@ pub struct VaultDocument {
     pub editor_drafts: Vec<StoredEditorDraft>,
     #[serde(default)]
     pub activities: Vec<Activity>,
-    #[serde(default)]
-    pub approvals: Vec<ApprovalRequest>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -850,5 +826,5 @@ pub struct AppState {
 #[serde(rename_all = "camelCase")]
 pub struct ImportSummary {
     pub added: usize,
-    pub updated: usize,
+    pub merged: usize,
 }

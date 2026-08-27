@@ -34,7 +34,8 @@ fn fill_standard_windows_control(value: &str) -> Result<bool> {
     use windows::Win32::{
         Foundation::{LPARAM, WPARAM},
         UI::WindowsAndMessaging::{
-            GUITHREADINFO, GetClassNameW, GetGUIThreadInfo, SendMessageW, WM_SETTEXT,
+            GUITHREADINFO, GetClassNameW, GetGUIThreadInfo, SEND_MESSAGE_TIMEOUT_FLAGS,
+            SMTO_ABORTIFHUNG, SMTO_BLOCK, SendMessageTimeoutW, WM_SETTEXT,
         },
     };
 
@@ -60,15 +61,22 @@ fn fill_standard_windows_control(value: &str) -> Result<bool> {
         .encode_utf16()
         .chain(std::iter::once(0))
         .collect::<Vec<_>>();
-    let result = unsafe {
-        SendMessageW(
+    let mut control_result = 0_usize;
+    let dispatched = unsafe {
+        SendMessageTimeoutW(
             thread.hwndFocus,
             WM_SETTEXT,
-            Some(WPARAM(0)),
-            Some(LPARAM(wide.as_ptr() as isize)),
+            WPARAM(0),
+            LPARAM(wide.as_ptr() as isize),
+            SEND_MESSAGE_TIMEOUT_FLAGS(SMTO_ABORTIFHUNG.0 | SMTO_BLOCK.0),
+            1_000,
+            Some(&mut control_result),
         )
     };
-    if result.0 == 0 {
+    if dispatched.0 == 0 {
+        bail!("前台输入控件无响应，已取消写入");
+    }
+    if control_result == 0 {
         bail!("前台输入控件拒绝写入");
     }
     Ok(true)

@@ -1,86 +1,17 @@
 use crate::model::{SecretBundle, StoredConnection};
 use anyhow::{Result, bail};
 use base64::{Engine, engine::general_purpose::STANDARD};
-use regex::Regex;
 use reqwest::header::{HeaderMap, HeaderName};
-use std::{collections::HashSet, sync::LazyLock};
+use std::collections::HashSet;
 use url::Url;
 
-static SHELL_CONTROL: LazyLock<Regex> =
-    LazyLock::new(|| Regex::new(r#"[\n\r;&|<>`]|\$\("#).unwrap());
-static OBSERVE_PATTERNS: LazyLock<Vec<Regex>> = LazyLock::new(|| {
-    [
-        r"^(pwd|whoami|hostname|uptime|date|id)$",
-        r"^uname(?:\s+-[asnrvmpio]+)?$",
-        r"^df(?:\s+-(?:h|H|T|hT|Th))?$",
-        r"^free(?:\s+-(?:h|m|g))?$",
-        r"^nvidia-smi(?:\s+(?:-L|-q))?$",
-        r"^systemctl\s+(?:is-active|is-enabled)\s+[A-Za-z0-9@_.:-]+$",
-    ]
-    .into_iter()
-    .map(|pattern| Regex::new(pattern).unwrap())
-    .collect()
-});
-static DIAGNOSTIC_PATTERNS: LazyLock<Vec<Regex>> = LazyLock::new(|| {
-    [
-        r"^(pwd|whoami|hostname|uptime|date|id)(\s+.*)?$",
-        r"^uname(\s+.*)?$",
-        r"^(df|free|ps|ls|stat|du)(\s+.*)?$",
-        r"^(head|tail|grep)(\s+.*)?$",
-        r"^systemctl\s+(status|is-active|is-enabled|show|list-units)(\s+.*)?$",
-        r"^journalctl(\s+.*)?$",
-        r"^docker\s+(ps|logs|inspect|stats)(\s+.*)?$",
-        r"^git\s+(status|log|diff|branch|show)(\s+.*)?$",
-    ]
-    .into_iter()
-    .map(|pattern| Regex::new(pattern).unwrap())
-    .collect()
-});
-
-pub fn assert_ssh_command_allowed(connection: &StoredConnection, command: &str) -> Result<String> {
+pub fn validate_ssh_command(command: &str) -> Result<String> {
     let value = command.trim();
     if value.is_empty() {
         bail!("命令不能为空");
     }
     if value.chars().count() > 4_000 {
         bail!("命令过长");
-    }
-    if connection.security_mode == "unrestricted" {
-        return Ok(value.to_owned());
-    }
-    if SHELL_CONTROL.is_match(value) {
-        bail!("当前安全模式禁止管道、重定向、命令拼接和命令替换");
-    }
-    if !matches!(
-        connection.security_mode.as_str(),
-        "diagnostic" | "restricted"
-    ) {
-        if !OBSERVE_PATTERNS
-            .iter()
-            .any(|pattern| pattern.is_match(value))
-        {
-            bail!("观察模式不允许该命令；需要读取日志或文件时，请由用户改为诊断模式");
-        }
-        return Ok(value.to_owned());
-    }
-    if connection.security_mode == "diagnostic" {
-        if !DIAGNOSTIC_PATTERNS
-            .iter()
-            .any(|pattern| pattern.is_match(value))
-        {
-            bail!("诊断模式不允许该命令；可改为受限模式并添加允许的命令前缀");
-        }
-        return Ok(value.to_owned());
-    }
-    if connection.allowed_commands.is_empty() {
-        bail!("受限模式尚未配置任何允许的命令前缀");
-    }
-    if !connection
-        .allowed_commands
-        .iter()
-        .any(|prefix| value == prefix || value.starts_with(&format!("{prefix} ")))
-    {
-        bail!("命令不在该连接的允许列表中");
     }
     Ok(value.to_owned())
 }
@@ -245,8 +176,6 @@ mod tests {
             host_fingerprint: String::new(),
             host_fingerprint_host: String::new(),
             host_fingerprint_port: 0,
-            security_mode: String::new(),
-            allowed_commands: vec![],
             base_url: "https://api.example.com/v1/".into(),
             auth_header: "X-API-Key".into(),
             auth_location: "header".into(),
@@ -349,65 +278,21 @@ mod tests {
     }
 
     #[test]
-    fn ssh_policy_blocks_shell_control_and_unknown_commands() {
-        let mut connection = connection();
-        connection.kind = "ssh".into();
-        connection.capabilities = vec!["fill".into(), "ssh".into()];
-        connection.security_mode = "readonly".into();
+    fn ssh_validation_accepts_commands_without_classifying_their_purpose() {
         for command in [
             "hostname",
-            "uptime",
-            "uname -a",
-            "df -h",
-            "free -h",
-            "nvidia-smi",
-            "nvidia-smi -L",
-            "systemctl is-active nginx.service",
+            "nvidia-smi --query-gpu=name,memory.total --format=csv",
+            "head /srv/app/.env | grep TOKEN",
+            "mkdir -p /srv/train && python train.py --epochs 20",
+            "printf fixture-ok > /tmp/kru-probe",
         ] {
             assert!(
-                assert_ssh_command_allowed(&connection, command).is_ok(),
-                "observe command should be allowed: {command}"
+                validate_ssh_command(command).is_ok(),
+                "valid command should be accepted: {command}"
             );
         }
-        for command in [
-            "ps aux",
-            "head /srv/app/.env",
-            "journalctl -u app",
-            "docker logs app",
-            "docker inspect app",
-            "nvidia-smi -pm 1",
-        ] {
-            assert!(
-                assert_ssh_command_allowed(&connection, command).is_err(),
-                "observe command should be blocked: {command}"
-            );
-        }
-        assert!(assert_ssh_command_allowed(&connection, "rm -rf /tmp/example").is_err());
-        assert!(assert_ssh_command_allowed(&connection, "docker ps | cat").is_err());
-
-        connection.security_mode = "diagnostic".into();
-        for command in [
-            "ps aux",
-            "head /srv/app/.env",
-            "journalctl -u app",
-            "docker logs app",
-            "docker inspect app",
-        ] {
-            assert!(
-                assert_ssh_command_allowed(&connection, command).is_ok(),
-                "diagnostic command should be allowed: {command}"
-            );
-        }
-        assert!(assert_ssh_command_allowed(&connection, "docker logs app | cat").is_err());
-
-        connection.security_mode.clear();
-        assert!(assert_ssh_command_allowed(&connection, "hostname").is_ok());
-        assert!(assert_ssh_command_allowed(&connection, "docker inspect app").is_err());
-
-        connection.security_mode = "restricted".into();
-        connection.allowed_commands = vec!["docker logs".into()];
-        assert!(assert_ssh_command_allowed(&connection, "docker logs web").is_ok());
-        assert!(assert_ssh_command_allowed(&connection, "docker stop web").is_err());
+        assert!(validate_ssh_command("  ").is_err());
+        assert!(validate_ssh_command(&"x".repeat(4_001)).is_err());
     }
 
     #[test]

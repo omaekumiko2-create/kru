@@ -12,36 +12,109 @@ jobs:
   core:
     name: Headless core
     runs-on: ubuntu-22.04
+    timeout-minutes: 35
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
         with:
-          toolchain: "1.88"
+          toolchain: '1.88'
           components: rustfmt
       - uses: actions/setup-node@v4
         with:
-          node-version: "22"
+          node-version: '22'
           cache: npm
       - run: npm ci
+      - run: node scripts/check-version.mjs
       - run: cargo fmt --manifest-path src-tauri/Cargo.toml -- --check
-      - run: cargo test --manifest-path src-tauri/Cargo.toml --no-default-features
+      - run: cargo test --locked --manifest-path src-tauri/Cargo.toml --no-default-features
       - run: node --check renderer/app.js
       - run: node --check browser-extension/service-worker.js
+      - run: node --test browser-extension/service-worker.test.mjs
       - run: node --check browser-extension/content-script.js
       - run: node --check browser-extension/popup.js
 
   windows-gui:
     name: Windows GUI
     runs-on: windows-2022
+    timeout-minutes: 60
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
         with:
-          toolchain: "1.88"
+          toolchain: '1.88'
       - uses: actions/setup-node@v4
         with:
-          node-version: "22"
+          node-version: '22'
           cache: npm
       - run: npm ci
-      - run: cargo test --manifest-path src-tauri/Cargo.toml
+      - run: cargo test --locked --manifest-path src-tauri/Cargo.toml
       - run: npm run build
+      - run: npm run portable
+      - name: Verify packaged Windows application
+        shell: pwsh
+        run: |
+          $archives = @(Get-ChildItem dist -Filter '*-portable.zip')
+          if ($archives.Count -ne 1) { throw "Expected exactly one Windows portable archive." }
+          & scripts/verify-portable-windows.ps1 -Archive $archives[0].FullName
+      - run: node scripts/smoke-gui.mjs src-tauri/target/release/kru.exe
+
+  macos-gui:
+    name: macOS GUI
+    runs-on: macos-15
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: '1.88'
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+      - run: npm ci
+      - run: cargo test --locked --manifest-path src-tauri/Cargo.toml
+      - run: npm run build:mac
+      - run: node scripts/smoke-cli.mjs src-tauri/target/release/bundle/macos/KRU.app/Contents/MacOS/kru
+      - run: node scripts/smoke-gui.mjs src-tauri/target/release/bundle/macos/KRU.app/Contents/MacOS/kru
+      - run: npm run portable:mac
+      - name: Verify packaged macOS application
+        run: |
+          archives=(dist/*-portable.zip)
+          test ${#archives[@]} -eq 1
+          bash scripts/verify-portable-unix.sh "${archives[0]}" macos
+
+  linux-gui:
+    name: Linux GUI
+    runs-on: ubuntu-22.04
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Tauri system packages
+        run: >-
+          sudo apt-get update && sudo apt-get install -y
+          libwebkit2gtk-4.1-dev build-essential curl wget file
+          libssl-dev libayatana-appindicator3-dev librsvg2-dev
+          patchelf libxdo-dev xvfb xdg-utils
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: '1.88'
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+      - run: npm ci
+      - run: cargo test --locked --manifest-path src-tauri/Cargo.toml
+      - run: rm -rf src-tauri/target/release/bundle/appimage
+      - run: npm run build:linux
+      - name: Smoke AppImage CLI and MCP
+        run: |
+          mapfile -t appimages < <(find src-tauri/target/release/bundle/appimage -maxdepth 1 -type f -name '*.AppImage' -print)
+          test ${#appimages[@]} -eq 1
+          APPIMAGE_EXTRACT_AND_RUN=1 node scripts/smoke-cli.mjs "${appimages[0]}"
+          APPIMAGE_EXTRACT_AND_RUN=1 xvfb-run -a node scripts/smoke-gui.mjs "${appimages[0]}"
+      - run: npm run portable:linux
+      - name: Verify packaged Linux GUI application
+        run: |
+          archives=(dist/*-portable.tar.gz)
+          test ${#archives[@]} -eq 1
+          bash scripts/verify-portable-unix.sh "${archives[0]}" linux-gui

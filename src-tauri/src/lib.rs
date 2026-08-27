@@ -6,6 +6,7 @@ pub mod executor;
 pub mod mcp;
 pub mod model;
 pub mod policy;
+pub mod runtime_epoch;
 pub mod terminal;
 pub mod vault;
 
@@ -18,6 +19,10 @@ pub mod desktop;
 #[cfg(not(feature = "desktop-fill"))]
 #[path = "desktop_headless.rs"]
 pub mod desktop;
+#[cfg(feature = "gui")]
+pub mod gui_instance;
+#[cfg(feature = "gui")]
+pub mod system_integration;
 
 #[cfg(feature = "gui")]
 pub use commands::run_gui;

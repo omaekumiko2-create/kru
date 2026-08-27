@@ -4,7 +4,7 @@ on:
   workflow_dispatch:
   push:
     tags:
-      - "v*"
+      - 'v*'
 
 permissions:
   contents: write
@@ -12,21 +12,51 @@ permissions:
 jobs:
   windows:
     runs-on: windows-2022
+    timeout-minutes: 90
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
         with:
-          toolchain: "1.88"
+          toolchain: '1.88'
       - uses: actions/setup-node@v4
         with:
-          node-version: "22"
+          node-version: '22'
           cache: npm
       - run: npm ci
+      - run: node scripts/check-version.mjs
+      - run: node --test browser-extension/service-worker.test.mjs
+      - run: cargo test --locked --manifest-path src-tauri/Cargo.toml
       - run: npm run build
       - run: npm run portable
+      - name: Verify archive checksum
+        shell: pwsh
+        run: |
+          Push-Location dist
+          try {
+            $checksumFiles = @(Get-ChildItem -Filter '*.sha256')
+            if ($checksumFiles.Count -eq 0) { throw "No checksum files were produced" }
+            $checksumFiles | ForEach-Object {
+              $parts = (Get-Content -LiteralPath $_.FullName -Raw).Trim() -split '\s+', 2
+              if ($parts.Count -ne 2) { throw "Invalid checksum file: $($_.Name)" }
+              $archive = $parts[1]
+              if (-not (Test-Path -LiteralPath $archive -PathType Leaf)) { throw "Missing archive: $archive" }
+              $actual = (Get-FileHash -Algorithm SHA256 -LiteralPath $archive).Hash.ToLowerInvariant()
+              if ($actual -ne $parts[0].ToLowerInvariant()) { throw "Checksum mismatch: $archive" }
+            }
+          } finally {
+            Pop-Location
+          }
+      - name: Verify packaged Windows application
+        shell: pwsh
+        run: |
+          $archives = @(Get-ChildItem dist -Filter '*-portable.zip')
+          if ($archives.Count -ne 1) { throw "Expected exactly one Windows portable archive." }
+          & scripts/verify-portable-windows.ps1 -Archive $archives[0].FullName
+      - run: node scripts/smoke-gui.mjs src-tauri/target/release/kru.exe
       - uses: actions/upload-artifact@v4
         with:
           name: windows-portable
+          if-no-files-found: error
           path: |
             dist/*.zip
             dist/*.sha256
@@ -38,12 +68,14 @@ jobs:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
         with:
-          toolchain: "1.88"
+          toolchain: '1.88'
       - uses: actions/setup-node@v4
         with:
-          node-version: "22"
+          node-version: '22'
           cache: npm
       - run: npm ci
+      - run: node scripts/check-version.mjs
+      - run: cargo test --locked --manifest-path src-tauri/Cargo.toml
       - name: Validate Apple signing secrets
         env:
           APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
@@ -105,7 +137,7 @@ jobs:
           api_key_path="$RUNNER_TEMP/AuthKey_${APPLE_API_KEY}.p8"
           printf '%s' "$APPLE_API_KEY_P8_BASE64" | \
             openssl base64 -d -A -out "$api_key_path"
-          grep -Fq -- "-----BEGIN PRIVATE KEY-----" "$api_key_path"
+          test -s "$api_key_path"
           echo "APPLE_API_KEY_PATH=$api_key_path" >> "$GITHUB_ENV"
       - name: Build and sign macOS application
         run: npm run build:mac
@@ -115,23 +147,29 @@ jobs:
           APPLE_API_KEY: ${{ secrets.APPLE_API_KEY }}
         run: bash scripts/notarize-macos.sh src-tauri/target/release/bundle/macos/KRU.app
       - name: Verify signed and notarized macOS application
-        run: bash scripts/verify-notarized-macos.sh src-tauri/target/release/bundle/macos/KRU.app
+        run: |
+          app_path="src-tauri/target/release/bundle/macos/KRU.app"
+          signature_details="$(codesign --display --verbose=4 "$app_path" 2>&1)"
+          grep -Fq "Authority=Developer ID Application:" <<<"$signature_details"
+          grep -Fq "runtime" <<<"$signature_details"
+          grep -Fq "Timestamp=" <<<"$signature_details"
+          codesign --verify --deep --strict --verbose=2 "$app_path"
+          xcrun stapler validate "$app_path"
+          spctl --assess --type execute --verbose=4 "$app_path"
+      - run: node scripts/smoke-gui.mjs src-tauri/target/release/bundle/macos/KRU.app/Contents/MacOS/kru
       - name: Package notarized macOS application
         env:
           KRU_REQUIRE_DEVELOPER_ID: '1'
         run: npm run portable:mac
+      - name: Verify archive checksum
+        run: (cd dist && shasum -a 256 -c *.sha256)
       - name: Verify packaged macOS application
+        env:
+          KRU_REQUIRE_NOTARIZED: '1'
         run: |
           archives=(dist/*-portable.zip)
           test ${#archives[@]} -eq 1
-          (cd dist && shasum -a 256 -c *.sha256)
-          work="$(mktemp -d)"
-          trap 'rm -rf "$work"' EXIT
-          ditto -x -k "${archives[0]}" "$work"
-          app_count="$(find "$work" -type d -name KRU.app -prune | wc -l | tr -d ' ')"
-          test "$app_count" -eq 1
-          app_path="$(find "$work" -type d -name KRU.app -prune -print -quit)"
-          bash scripts/verify-notarized-macos.sh "$app_path"
+          bash scripts/verify-portable-unix.sh "${archives[0]}" macos
       - uses: actions/upload-artifact@v4
         with:
           name: macos-arm64-portable
@@ -149,6 +187,7 @@ jobs:
 
   linux-gui:
     runs-on: ubuntu-22.04
+    timeout-minutes: 90
     steps:
       - uses: actions/checkout@v4
       - name: Install Tauri system packages
@@ -156,39 +195,70 @@ jobs:
           sudo apt-get update && sudo apt-get install -y
           libwebkit2gtk-4.1-dev build-essential curl wget file
           libssl-dev libayatana-appindicator3-dev librsvg2-dev
-          patchelf libxdo-dev
+          patchelf libxdo-dev xvfb xdg-utils
       - uses: dtolnay/rust-toolchain@stable
         with:
-          toolchain: "1.88"
+          toolchain: '1.88'
       - uses: actions/setup-node@v4
         with:
-          node-version: "22"
+          node-version: '22'
           cache: npm
       - run: npm ci
-      - run: npm run release:linux
+      - run: node scripts/check-version.mjs
+      - run: cargo test --locked --manifest-path src-tauri/Cargo.toml
+      - run: rm -rf src-tauri/target/release/bundle/appimage
+      - run: npm run build:linux
+      - name: Smoke AppImage CLI and MCP
+        run: |
+          mapfile -t appimages < <(find src-tauri/target/release/bundle/appimage -maxdepth 1 -type f -name '*.AppImage' -print)
+          test ${#appimages[@]} -eq 1
+          APPIMAGE_EXTRACT_AND_RUN=1 node scripts/smoke-cli.mjs "${appimages[0]}"
+          APPIMAGE_EXTRACT_AND_RUN=1 xvfb-run -a node scripts/smoke-gui.mjs "${appimages[0]}"
+      - run: npm run portable:linux
+      - name: Verify archive checksum
+        run: (cd dist && sha256sum -c *.sha256)
+      - name: Verify packaged Linux GUI application
+        run: |
+          archives=(dist/*-portable.tar.gz)
+          test ${#archives[@]} -eq 1
+          bash scripts/verify-portable-unix.sh "${archives[0]}" linux-gui
       - uses: actions/upload-artifact@v4
         with:
           name: linux-gui-portable
+          if-no-files-found: error
           path: |
             dist/*.tar.gz
             dist/*.sha256
 
   linux-headless:
     runs-on: ubuntu-22.04
+    timeout-minutes: 60
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
         with:
-          toolchain: "1.88"
+          toolchain: '1.88'
       - uses: actions/setup-node@v4
         with:
-          node-version: "22"
+          node-version: '22'
           cache: npm
       - run: npm ci
-      - run: npm run release:headless
+      - run: node scripts/check-version.mjs
+      - run: cargo test --locked --manifest-path src-tauri/Cargo.toml --no-default-features
+      - run: npm run build:headless
+      - run: node scripts/smoke-cli.mjs src-tauri/target/release/kru
+      - run: npm run portable:headless
+      - name: Verify archive checksum
+        run: (cd dist && sha256sum -c *.sha256)
+      - name: Verify packaged Linux headless application
+        run: |
+          archives=(dist/*.tar.gz)
+          test ${#archives[@]} -eq 1
+          bash scripts/verify-portable-unix.sh "${archives[0]}" linux-headless
       - uses: actions/upload-artifact@v4
         with:
           name: linux-headless
+          if-no-files-found: error
           path: |
             dist/*.tar.gz
             dist/*.sha256
@@ -205,4 +275,4 @@ jobs:
       - name: Create GitHub release
         env:
           GH_TOKEN: ${{ github.token }}
-        run: gh release create "$GITHUB_REF_NAME" release-assets/* --repo "$GITHUB_REPOSITORY" --generate-notes --title "KRU $GITHUB_REF_NAME"
+        run: gh release create "$GITHUB_REF_NAME" release-assets/* --generate-notes --title "KRU $GITHUB_REF_NAME"

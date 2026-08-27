@@ -1,0 +1,8 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "macos-window-drag",
+  "description": "Allows the custom title bar to start native window dragging on macOS.",
+  "windows": ["main"],
+  "permissions": ["core:window:allow-start-dragging"],
+  "platforms": ["macOS"]
+}

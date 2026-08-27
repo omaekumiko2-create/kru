@@ -21,9 +21,8 @@ use serde_json::json;
 use std::{
     path::Path,
     sync::{Arc, RwLock},
-    time::{Duration, Instant},
+    time::Instant,
 };
-use tokio::time::sleep;
 use uuid::Uuid;
 
 #[derive(Clone)]
@@ -63,33 +62,6 @@ impl VaultMcp {
         } else {
             format!("MCP · {client_name}")
         }
-    }
-
-    async fn require_approval(&self, item_id: Uuid, action: &str, detail: &str) -> Result<bool> {
-        let Some(request) =
-            self.vault
-                .create_approval_request(item_id, &self.activity_source(), action, detail)?
-        else {
-            return Ok(false);
-        };
-        for _ in 0..240 {
-            sleep(Duration::from_millis(250)).await;
-            match self.vault.approval_status(request.id)?.as_deref() {
-                Some("approved") => {
-                    self.vault.remove_approval(request.id)?;
-                    return Ok(true);
-                }
-                Some("denied") => {
-                    self.vault.remove_approval(request.id)?;
-                    bail!("用户已拒绝本次调用");
-                }
-                Some("pending") => {}
-                Some("expired") | None => bail!("审核请求已取消或过期"),
-                Some(_) => bail!("审核请求状态无效"),
-            }
-        }
-        self.vault.remove_approval(request.id)?;
-        bail!("等待用户审核超时；请打开 KRU 后重试")
     }
 
     async fn track<T, F>(&self, item_id: Uuid, action: String, future: F) -> Result<T, String>
@@ -142,19 +114,23 @@ impl VaultMcp {
 #[derive(Debug, Deserialize, JsonSchema)]
 #[serde(rename_all = "camelCase")]
 struct SshExecuteInput {
-    #[schemars(description = "vault_items_list 返回的、已自动推导 SSH 动作的项目 ID")]
+    #[schemars(
+        description = "Item ID returned by vault_items_list for an item advertising the derived ssh_execute action."
+    )]
     connection_id: String,
-    #[schemars(description = "要执行的单条命令")]
+    #[schemars(description = "One command to execute.")]
     command: String,
     #[serde(default)]
-    #[schemars(description = "可选远程工作目录")]
+    #[schemars(description = "Optional remote working directory.")]
     cwd: Option<String>,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
 #[serde(rename_all = "camelCase")]
 struct ApiToolInput {
-    #[schemars(description = "vault_items_list 返回的、已自动推导 HTTP 动作的项目 ID")]
+    #[schemars(
+        description = "Item ID returned by vault_items_list for an item advertising the derived api_request action."
+    )]
     connection_id: String,
     #[serde(flatten)]
     request: ApiRequestInput,
@@ -163,45 +139,51 @@ struct ApiToolInput {
 #[derive(Debug, Deserialize, JsonSchema)]
 #[serde(rename_all = "camelCase")]
 struct SecretFillInput {
-    #[schemars(description = "vault_items_list 返回的项目 ID")]
+    #[schemars(description = "Item ID returned by vault_items_list.")]
     item_id: String,
-    #[schemars(description = "vault_items_list 返回的秘密字段名")]
+    #[schemars(description = "Secret field name returned by vault_items_list.")]
     field: String,
     #[schemars(
-        description = "写入目标：browser（已配对扩展，推荐用于可靠浏览器自动化）、desktop（仅在能保证真实操作系统前台焦点时）或 terminal"
+        description = "Write target: browser (paired extension; recommended for reliable browser automation), desktop (only when the real operating-system foreground focus is guaranteed), or terminal."
     )]
     target: String,
     #[serde(default)]
-    #[schemars(description = "target=terminal 时必填，来自 terminal_open")]
+    #[schemars(
+        description = "Required when target=terminal; use the session ID returned by terminal_open."
+    )]
     session_id: Option<String>,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
 #[serde(rename_all = "camelCase")]
 struct TerminalOpenInput {
-    #[schemars(description = "Agent 决定运行的程序名称或路径；直接启动，不经过 Shell")]
+    #[schemars(
+        description = "Program name or path selected by the agent. KRU starts it directly without a shell."
+    )]
     program: String,
     #[serde(default)]
-    #[schemars(description = "作为独立 argv 值传递的参数")]
+    #[schemars(description = "Arguments passed as individual argv values.")]
     args: Vec<String>,
     #[serde(default)]
-    #[schemars(description = "可选的绝对工作目录")]
+    #[schemars(description = "Optional absolute working directory.")]
     cwd: Option<String>,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
 #[serde(rename_all = "camelCase")]
 struct TerminalSessionInput {
-    #[schemars(description = "terminal_open 返回的会话 ID")]
+    #[schemars(description = "Session ID returned by terminal_open.")]
     session_id: String,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
 #[serde(rename_all = "camelCase")]
 struct TerminalInputInput {
-    #[schemars(description = "terminal_open 返回的会话 ID")]
+    #[schemars(description = "Session ID returned by terminal_open.")]
     session_id: String,
-    #[schemars(description = "普通终端输入；需要回车时由 Agent 在末尾加入换行")]
+    #[schemars(
+        description = "Ordinary terminal input. Append a newline when the agent intends to press Enter."
+    )]
     text: String,
 }
 
@@ -209,20 +191,20 @@ struct TerminalInputInput {
 impl VaultMcp {
     #[tool(
         name = "vault_items_list",
-        description = "列出已向 Agent 开启的 KRU 项目、模块和支持动作。只有用户明确开启‘Agent 可见’的模块才会包含明文 value；其他模块只返回名称和配置状态。"
+        description = "KRU's credential-discovery entry point. Call this tool first when the user writes 'use <item name> in KRU MCP', mentions KRU, or requests a task involving stored credentials such as a login, password, API key or token, authentication, SSH or VPS access, a private key or passphrase, or TOTP/2FA. In the canonical use phrase, match only the text between 'use ' and ' in KRU MCP' as the item name. Prefer an exact item-name match, then choose secret_fill, ssh_execute, or api_request from the item's advertised actions. Secret plaintext is never returned unless the user explicitly made that module visible to the agent."
     )]
     async fn vault_items_list(&self) -> Result<String, String> {
         let items = self
             .vault
-            .list_connections()
+            .list_decrypted_connections()
             .map_err(|error| error.to_string())?
             .into_iter()
-            .filter(|item| item.enabled && !item.capabilities.is_empty())
-            .map(|item| -> Result<serde_json::Value, String> {
-                let decrypted = self
-                    .vault
-                    .get_connection(item.id)
-                    .map_err(|error| error.to_string())?;
+            .filter(|decrypted| {
+                decrypted.stored.enabled
+                    && !decrypted.stored.normalized_capabilities().is_empty()
+            })
+            .map(|decrypted| -> Result<serde_json::Value, String> {
+                let item = decrypted.stored.public(Some(&decrypted.secrets));
                 let modules = decrypted
                     .stored
                     .modules
@@ -272,7 +254,7 @@ impl VaultMcp {
                     actions.push("secret_fill");
                 }
                 if has_ssh {
-                    let mut ssh = json!({"mode": item.security_mode, "allowedCommands": item.allowed_commands});
+                    let mut ssh = json!({});
                     if decrypted.stored.modules.iter().find(|module| module.kind == "host").is_some_and(|module| module.agent_visible()) {
                         ssh["host"] = json!(item.host);
                     }
@@ -309,7 +291,7 @@ impl VaultMcp {
 
     #[tool(
         name = "secret_fill",
-        description = "把一个已保存字段写入 Agent 已聚焦的控件或指定 KRU 终端。可靠的浏览器自动化使用已配对扩展的 browser；desktop 仅在你能保证真实操作系统前台焦点时使用。KRU 不判断用途、不自动提交，也不返回字段值。"
+        description = "Use when a login page, authentication dialog, or CLI prompt needs a stored field such as a username, password, token, or TOTP/2FA code. KRU writes the field to the control already focused by the agent or to a specified KRU terminal without returning hidden plaintext. Call vault_items_list first to select the item and field. Prefer browser through the paired extension for reliable browser automation; use desktop only when the real operating-system foreground focus is guaranteed. KRU never submits automatically."
     )]
     async fn secret_fill(
         &self,
@@ -322,12 +304,6 @@ impl VaultMcp {
         };
         let field = input.field;
         self.track(item_id, format!("向 {target} 填写字段 {field}"), async {
-            let was_approved = self
-                .require_approval(item_id, "填写秘密", &format!("{target} · {field}"))
-                .await?;
-            if was_approved && target == "desktop" {
-                sleep(Duration::from_secs(5)).await;
-            }
             let (_, kind, mut value) = self.vault.get_secret_value(item_id, &field)?;
             if kind == "totp" {
                 value = current_totp(&value)?;
@@ -364,7 +340,7 @@ impl VaultMcp {
 
     #[tool(
         name = "terminal_open",
-        description = "在 KRU 托管的本地 PTY 中直接启动程序。Agent 决定程序和 argv；不经过 Shell。"
+        description = "Start a program directly in a KRU-managed local PTY. The agent chooses the program and argv; no shell is used."
     )]
     async fn terminal_open(
         &self,
@@ -379,7 +355,7 @@ impl VaultMcp {
 
     #[tool(
         name = "terminal_input",
-        description = "向 KRU 托管的 PTY 写入普通文本。secret_fill 不会自动换行，需要提交时由 Agent 再发送回车。"
+        description = "Write ordinary text to a KRU-managed PTY. secret_fill never adds a newline, so the agent must send Enter separately when submission is required."
     )]
     async fn terminal_input(
         &self,
@@ -395,7 +371,7 @@ impl VaultMcp {
 
     #[tool(
         name = "terminal_read",
-        description = "读取 PTY 自上次调用后的输出和进程状态；KRU 填入过的秘密及常见编码形式会被脱敏。"
+        description = "Read PTY output produced since the previous call and the current process state. Values filled by KRU and common encodings of those values are redacted."
     )]
     async fn terminal_read(
         &self,
@@ -412,7 +388,7 @@ impl VaultMcp {
 
     #[tool(
         name = "terminal_close",
-        description = "关闭并清理 KRU 托管的 PTY；若程序仍在运行则终止它。"
+        description = "Close and clean up a KRU-managed PTY, terminating the program if it is still running."
     )]
     async fn terminal_close(
         &self,
@@ -428,7 +404,7 @@ impl VaultMcp {
 
     #[tool(
         name = "ssh_execute",
-        description = "使用本地保险库在已保存 VPS 上执行受策略限制的命令；认证信息不会返回给 Agent。"
+        description = "Use when the user asks to connect to, inspect, or operate an SSH host, Linux server, or VPS stored in KRU. Call vault_items_list first and choose an item advertising ssh_execute. KRU authenticates locally with its stored password or private key and runs the requested command. KRU has no observation, diagnostic, restricted, or execution mode; do not ask the user to change one. Authentication plaintext is never returned to the agent."
     )]
     async fn ssh_execute(
         &self,
@@ -444,24 +420,23 @@ impl VaultMcp {
             return Err("所选项目的模块尚未形成可用 SSH 动作".to_owned());
         }
         let result = self
-            .track(connection_id, "执行 SSH 命令".to_owned(), async {
-                self.require_approval(connection_id, "执行 SSH 命令", &input.command)
-                    .await?;
+            .track(
+                connection_id,
+                "执行 SSH 命令".to_owned(),
                 execute_ssh(
                     &self.vault,
                     &connection,
                     &input.command,
                     input.cwd.as_deref(),
-                )
-                .await
-            })
+                ),
+            )
             .await?;
         serde_json::to_string_pretty(&result).map_err(|error| error.to_string())
     }
 
     #[tool(
         name = "api_request",
-        description = "调用 API；认证由 KRU 注入。保存 URL 时锁定同源；未保存 URL 时由调用方提供绝对 HTTPS URL（本机回环可用 HTTP）。"
+        description = "Use when an API request requires an API key, token, bearer token, or other credential stored in KRU. Call vault_items_list first and choose an item advertising api_request. KRU injects authentication locally and sends the request without returning credential plaintext. A saved URL locks requests to the same origin. Without a saved URL, the caller must provide an absolute HTTPS URL; HTTP is allowed only for loopback addresses."
     )]
     async fn api_request(
         &self,
@@ -477,23 +452,12 @@ impl VaultMcp {
             return Err("所选项目的模块尚未形成可用 HTTP 动作".to_owned());
         }
         let action = format!("发送 {} API 请求", input.request.method.to_uppercase());
-        let approval_detail = format!(
-            "{} {}",
-            input.request.method.to_uppercase(),
-            if input.request.url.is_empty() {
-                input.request.path.as_str()
-            } else {
-                input.request.url.as_str()
-            }
-        );
         let result = self
-            .track(connection_id, action, async {
-                if connection.secrets.has_auth_secret() {
-                    self.require_approval(connection_id, "发送 API 请求", &approval_detail)
-                        .await?;
-                }
-                execute_api(&connection, input.request).await
-            })
+            .track(
+                connection_id,
+                action,
+                execute_api(&connection, input.request),
+            )
             .await?;
         serde_json::to_string_pretty(&result).map_err(|error| error.to_string())
     }
@@ -503,7 +467,7 @@ impl VaultMcp {
 impl ServerHandler for VaultMcp {
     fn get_info(&self) -> ServerInfo {
         ServerInfo::new(ServerCapabilities::builder().enable_tools().build()).with_instructions(
-            "KRU 是无智能的本地凭据执行工具。先用 vault_items_list 选择项目和字段。模块仅在用户开启 Agent 可见时包含 value；没有 value 时不得索取或猜测，请调用 secret_fill、ssh_execute 或 api_request。可靠的浏览器自动化使用已配对扩展的 target=browser；target=desktop 只在你能保证真实操作系统前台焦点时使用。后台 DOM 聚焦不等于系统前台焦点。",
+            "KRU is a non-agentic local credential execution tool; it does not plan tasks. Discovery rule: when the user writes 'use <name> in KRU MCP', treat only the text between 'use ' and ' in KRU MCP' as the item name, call vault_items_list immediately, and prefer an exact name match. When a task involves a login, password, username, API key or token, authentication, SSH or VPS access, a private key or passphrase, TOTP/2FA, or any other credential, call vault_items_list before asking the user to provide or paste a secret. After selecting an item, use its advertised actions to call secret_fill, ssh_execute, or api_request. KRU has no observation, diagnostic, restricted, or execution mode; when ssh_execute is advertised, send the command the task actually requires and never ask the user to change a mode. A module contains value only when the user has explicitly made it visible to the agent. If value is absent, do not request, guess, or attempt to retrieve plaintext; let KRU perform the final authentication action. For reliable browser automation, use target=browser with the paired extension. Use target=desktop only when the real operating-system foreground focus is guaranteed; background DOM focus is not foreground OS focus.",
         )
     }
 
@@ -545,13 +509,25 @@ fn display_client_name(raw_name: &str) -> String {
 }
 
 pub async fn serve_stdio(vault: Vault) -> Result<()> {
-    let service = VaultMcp::new(vault).serve(stdio()).await?;
-    service.waiting().await?;
-    Ok(())
+    let data_dir = vault.data_dir().to_path_buf();
+    let launcher = launcher_executable()?;
+    let build_id = crate::runtime_epoch::activate_build(&data_dir, &launcher)?;
+    crate::runtime_epoch::exit_process_when_changed(data_dir, build_id)?;
+    let server = VaultMcp::new(vault);
+    let browser = server.browser.clone();
+    browser.sync().await;
+    let result = async {
+        let service = server.serve(stdio()).await?;
+        service.waiting().await?;
+        Ok(())
+    }
+    .await;
+    browser.stop().await;
+    result
 }
 
 pub fn render_config(format: &str) -> Result<String> {
-    let executable = std::env::current_exe().context("无法确定 KRU 可执行文件路径")?;
+    let executable = launcher_executable()?;
     let executable = path_text(&executable);
     match format {
         "stdio-json" => Ok(serde_json::to_string_pretty(&json!({
@@ -563,6 +539,67 @@ pub fn render_config(format: &str) -> Result<String> {
         )),
         _ => bail!("未知配置格式：{format}"),
     }
+}
+
+pub fn launcher_executable() -> Result<std::path::PathBuf> {
+    #[cfg(target_os = "linux")]
+    if let Some(path) = validated_linux_launcher(
+        std::env::var_os("KRU_LAUNCHER_PATH").map(std::path::PathBuf::from),
+        std::env::var_os("APPIMAGE").map(std::path::PathBuf::from),
+    ) {
+        return Ok(path);
+    }
+    #[cfg(target_os = "linux")]
+    if let Some(path) = std::env::var_os("APPIMAGE").map(std::path::PathBuf::from)
+        && path.is_absolute()
+        && path.is_file()
+    {
+        return Ok(path);
+    }
+    let current = std::env::current_exe().context("无法确定 KRU 可执行文件路径")?;
+    Ok(stable_launcher_executable(current))
+}
+
+fn stable_launcher_executable(current: std::path::PathBuf) -> std::path::PathBuf {
+    let Some(parent) = current.parent() else {
+        return current;
+    };
+    if !parent
+        .file_name()
+        .is_some_and(|name| name.eq_ignore_ascii_case("deps"))
+    {
+        return current;
+    }
+    let Some(file_name) = current.file_name() else {
+        return current;
+    };
+    let Some(release_dir) = parent.parent() else {
+        return current;
+    };
+    let stable = release_dir.join(file_name);
+    if stable.is_file() { stable } else { current }
+}
+
+#[cfg(target_os = "linux")]
+fn validated_linux_launcher(
+    candidate: Option<std::path::PathBuf>,
+    appimage: Option<std::path::PathBuf>,
+) -> Option<std::path::PathBuf> {
+    use std::os::unix::fs::PermissionsExt;
+
+    let candidate = candidate?;
+    let appimage = appimage?;
+    let metadata = candidate.metadata().ok()?;
+    if !candidate.is_absolute()
+        || !appimage.is_absolute()
+        || !metadata.is_file()
+        || metadata.permissions().mode() & 0o111 == 0
+        || !appimage.is_file()
+        || candidate.parent()?.canonicalize().ok()? != appimage.parent()?.canonicalize().ok()?
+    {
+        return None;
+    }
+    Some(candidate)
 }
 
 fn path_text(path: &Path) -> String {
@@ -580,6 +617,43 @@ mod tests {
         ConnectionInput, ItemModule, NamedSecrets, SecretBundle, SecretField, SecretProfile,
     };
     use tempfile::tempdir;
+
+    #[test]
+    fn development_binary_registers_the_stable_release_launcher() {
+        let directory = tempdir().unwrap();
+        let release = directory.path().join("release");
+        let deps = release.join("deps");
+        std::fs::create_dir_all(&deps).unwrap();
+        let stable = release.join(if cfg!(windows) { "kru.exe" } else { "kru" });
+        let development = deps.join(if cfg!(windows) { "kru.exe" } else { "kru" });
+        std::fs::write(&stable, "stable").unwrap();
+        std::fs::write(&development, "development").unwrap();
+
+        assert_eq!(stable_launcher_executable(development), stable);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn portable_launcher_must_be_executable_and_beside_appimage() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let directory = tempdir().unwrap();
+        let launcher = directory.path().join("kru");
+        let appimage = directory.path().join("KRU.AppImage");
+        std::fs::write(&launcher, "#!/bin/sh\n").unwrap();
+        std::fs::write(&appimage, "appimage").unwrap();
+        std::fs::set_permissions(&launcher, std::fs::Permissions::from_mode(0o755)).unwrap();
+        assert_eq!(
+            validated_linux_launcher(Some(launcher.clone()), Some(appimage.clone())),
+            Some(launcher.clone())
+        );
+
+        std::fs::set_permissions(&launcher, std::fs::Permissions::from_mode(0o644)).unwrap();
+        assert_eq!(
+            validated_linux_launcher(Some(launcher), Some(appimage)),
+            None
+        );
+    }
 
     #[tokio::test]
     async fn item_list_only_exposes_values_enabled_by_user() {
@@ -608,6 +682,18 @@ mod tests {
                         value: String::new(),
                         agent_visible: Some(false),
                     },
+                    ItemModule {
+                        kind: "host".into(),
+                        name: String::new(),
+                        value: "ssh.example.test".into(),
+                        agent_visible: Some(true),
+                    },
+                    ItemModule {
+                        kind: "port".into(),
+                        name: String::new(),
+                        value: "22".into(),
+                        agent_visible: Some(true),
+                    },
                 ],
                 name: "test login".into(),
                 enabled: true,
@@ -620,8 +706,6 @@ mod tests {
                 http_auth_type: String::new(),
                 private_key_import_path: String::new(),
                 host_fingerprint: String::new(),
-                security_mode: String::new(),
-                allowed_commands: vec![],
                 base_url: String::new(),
                 auth_header: String::new(),
                 auth_location: String::new(),
@@ -658,7 +742,18 @@ mod tests {
         assert!(output.contains("password"));
         let listed: serde_json::Value = serde_json::from_str(&output).unwrap();
         assert_eq!(listed["items"][0]["type"], "item");
-        assert_eq!(listed["items"][0]["capabilities"], json!(["fill"]));
+        assert_eq!(listed["items"][0]["capabilities"], json!(["fill", "ssh"]));
+        assert_eq!(
+            listed["items"][0]["target"]["ssh"]["host"],
+            "ssh.example.test"
+        );
+        assert_eq!(listed["items"][0]["target"]["ssh"]["port"], 22);
+        assert!(listed["items"][0]["target"]["ssh"].get("mode").is_none());
+        assert!(
+            listed["items"][0]["target"]["ssh"]
+                .get("allowedCommands")
+                .is_none()
+        );
         assert!(output.contains("mcp-visible-user-marker"));
         assert!(!output.contains("mcp-hidden-password-marker"));
 

@@ -752,6 +752,8 @@ fn should_hide_on_close(close_behavior: &str, tray_available: bool) -> bool {
 }
 
 fn show_main_window(app: &AppHandle) {
+    #[cfg(target_os = "macos")]
+    let _ = app.show();
     if let Some(window) = app.get_webview_window("main") {
         let _ = window.unminimize();
         let _ = window.show();
@@ -852,7 +854,7 @@ fn request_square_corners(_window: &WebviewWindow) -> Result<()> {
 pub fn run_gui() -> Result<()> {
     let data_dir = app_data_dir()?;
     let mut gui_instance = GuiInstance::acquire(&data_dir)?;
-    tauri::Builder::default()
+    let app = tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_clipboard_manager::init())
         .plugin(tauri_plugin_opener::init())
@@ -979,8 +981,19 @@ pub fn run_gui() -> Result<()> {
             open_data_folder,
             window_action,
         ])
-        .run(tauri::generate_context!())
+        .build(tauri::generate_context!())
         .context("KRU GUI 启动失败")?;
+
+    #[cfg(target_os = "macos")]
+    app.run(|app, event| {
+        if let tauri::RunEvent::Reopen { .. } = event {
+            show_main_window(app);
+        }
+    });
+
+    #[cfg(not(target_os = "macos"))]
+    app.run(|_, _| {});
+
     Ok(())
 }
 

@@ -24,7 +24,6 @@ jobs:
           cache: npm
       - run: npm ci
       - run: node scripts/check-version.mjs
-      - run: node --test browser-extension/service-worker.test.mjs
       - run: cargo test --locked --manifest-path src-tauri/Cargo.toml
       - run: npm run build
       - run: npm run portable

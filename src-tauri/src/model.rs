@@ -476,6 +476,30 @@ pub struct ApiAuthHeader {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct PortableConnection {
+    pub id: Uuid,
+    pub modules: Vec<ItemModule>,
+    pub name: String,
+    pub enabled: bool,
+    pub created_at: String,
+    pub updated_at: String,
+    pub description: String,
+    pub http_auth_type: String,
+    pub private_key_name: String,
+    pub host_fingerprint: String,
+    pub host_fingerprint_host: String,
+    pub host_fingerprint_port: u16,
+    pub auth_header: String,
+    pub auth_location: String,
+    pub auth_prefix: String,
+    pub api_auth_headers: Vec<ApiAuthHeader>,
+    pub allowed_methods: Vec<String>,
+    pub allowed_path_prefixes: Vec<String>,
+    pub test_path: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct PublicConnection {
     pub id: Uuid,
@@ -644,10 +668,6 @@ pub fn normalize_item_capabilities(values: &[String], legacy_kind: &str) -> Vec<
 pub struct ConnectionInput {
     #[serde(default)]
     pub id: Option<Uuid>,
-    #[serde(default, rename = "type")]
-    pub kind: String,
-    #[serde(default)]
-    pub capabilities: Vec<String>,
     #[serde(default)]
     pub modules: Vec<ItemModule>,
     pub name: String,
@@ -657,26 +677,9 @@ pub struct ConnectionInput {
     pub description: String,
 
     #[serde(default)]
-    pub host: String,
-    #[serde(default = "default_ssh_port")]
-    pub port: u16,
-    #[serde(default)]
-    pub username: String,
-    #[serde(default)]
-    pub auth_type: String,
-    #[serde(default)]
-    pub ssh_auth_type: String,
-    #[serde(default)]
     pub http_auth_type: String,
     #[serde(default)]
     pub private_key_import_path: String,
-    // Accepted only for backward-compatible deserialization. Vault save logic
-    // deliberately ignores client-supplied trust material.
-    #[serde(default)]
-    pub host_fingerprint: String,
-
-    #[serde(default)]
-    pub base_url: String,
     #[serde(default)]
     pub auth_header: String,
     #[serde(default)]
@@ -691,14 +694,6 @@ pub struct ConnectionInput {
     pub allowed_path_prefixes: Vec<String>,
     #[serde(default)]
     pub test_path: String,
-    #[serde(default)]
-    pub cli: Option<CliProfile>,
-    #[serde(default)]
-    pub browser: Option<BrowserProfile>,
-    #[serde(default)]
-    pub credential: Option<CredentialProfile>,
-    #[serde(default)]
-    pub secret: Option<SecretProfile>,
     #[serde(default)]
     pub remove_secret_names: Vec<String>,
 

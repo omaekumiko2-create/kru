@@ -10,7 +10,7 @@ use mcp_vault::crypto::MasterKey;
 use mcp_vault::run_gui;
 use mcp_vault::{backup, browser::BrowserBridge, mcp, model::SettingsPatch, vault::Vault};
 use std::time::{Duration, Instant};
-use std::{env, io::IsTerminal, path::PathBuf};
+use std::{env, path::PathBuf};
 use tokio::time::sleep;
 
 fn app_data_dir() -> Result<PathBuf> {
@@ -87,13 +87,7 @@ async fn dispatch() -> Result<()> {
             Ok(())
         }
         [command, action, file] if command == "backup" && action == "import" => {
-            let summary = if backup::backup_requires_password(file)? {
-                require_tty()?;
-                let password = rpassword::prompt_password("旧版备份密码：")?;
-                backup::import_legacy_from_file(&vault, file, &password)?
-            } else {
-                backup::import_from_file(&vault, file)?
-            };
+            let summary = backup::import_from_file(&vault, file)?;
             println!(
                 "已导入：新增 {}，合并重复 {}",
                 summary.added, summary.merged
@@ -169,11 +163,4 @@ async fn reset_browser(vault: &Vault) -> Result<()> {
     bridge.reset_pairing().await?;
     bridge.stop().await;
     print_browser_status(vault)
-}
-
-fn require_tty() -> Result<()> {
-    if !std::io::stdin().is_terminal() || !std::io::stderr().is_terminal() {
-        anyhow::bail!("备份密码只能从真实终端交互读取；不接受管道、参数或环境变量")
-    }
-    Ok(())
 }

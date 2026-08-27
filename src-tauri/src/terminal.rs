@@ -832,7 +832,10 @@ mod tests {
             .unwrap();
         let after_fill = manager.read(session.session_id).unwrap();
         combined.push_str(&after_fill.output);
-        assert!(after_fill.running, "secret_fill must not submit the prompt");
+        assert!(
+            after_fill.running,
+            "credential_fill must not submit the prompt"
+        );
         manager
             .input(
                 session.session_id,

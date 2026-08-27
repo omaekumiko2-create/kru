@@ -12,7 +12,6 @@ use crate::{
     vault::Vault,
 };
 use anyhow::{Context, Result};
-use serde::Serialize;
 use std::{
     path::PathBuf,
     process::Command,
@@ -36,7 +35,6 @@ pub struct AppRuntime {
     executable: String,
     browser: BrowserBridge,
     pending_private_key: Mutex<Option<PathBuf>>,
-    pending_legacy_backup: Mutex<Option<PathBuf>>,
     owner_session: Mutex<OwnerSession>,
     agent_registry: AgentRegistry,
     tray_available: AtomicBool,
@@ -45,13 +43,6 @@ pub struct AppRuntime {
 #[derive(Default)]
 struct OwnerSession {
     unlocked_until: Option<Instant>,
-}
-
-#[derive(Serialize)]
-#[serde(rename_all = "camelCase")]
-struct BackupImportResult {
-    summary: Option<ImportSummary>,
-    legacy_password_required: bool,
 }
 
 const OWNER_SESSION_DURATION: Duration = Duration::from_secs(10 * 60);
@@ -658,8 +649,7 @@ async fn export_backup(
 async fn import_backup(
     app: AppHandle,
     runtime: State<'_, AppRuntime>,
-) -> Result<Option<BackupImportResult>, String> {
-    *runtime.pending_legacy_backup.lock().await = None;
+) -> Result<Option<ImportSummary>, String> {
     let selected = app
         .dialog()
         .file()
@@ -669,41 +659,9 @@ async fn import_backup(
         return Ok(None);
     };
     let path = path.into_path().map_err(command_error)?;
-    if backup::backup_requires_password(&path).map_err(command_error)? {
-        *runtime.pending_legacy_backup.lock().await = Some(path);
-        return Ok(Some(BackupImportResult {
-            summary: None,
-            legacy_password_required: true,
-        }));
-    }
     let summary = backup::import_from_file(&runtime.vault, path).map_err(command_error)?;
     emit_changed(&app);
-    Ok(Some(BackupImportResult {
-        summary: Some(summary),
-        legacy_password_required: false,
-    }))
-}
-
-#[tauri::command]
-async fn import_legacy_backup(
-    app: AppHandle,
-    runtime: State<'_, AppRuntime>,
-    password: String,
-) -> Result<ImportSummary, String> {
-    let path = runtime
-        .pending_legacy_backup
-        .lock()
-        .await
-        .clone()
-        .ok_or_else(|| "请重新选择旧版备份文件".to_owned())?;
-    let summary =
-        backup::import_legacy_from_file(&runtime.vault, &path, &password).map_err(command_error)?;
-    let mut pending = runtime.pending_legacy_backup.lock().await;
-    if pending.as_ref() == Some(&path) {
-        *pending = None;
-    }
-    emit_changed(&app);
-    Ok(summary)
+    Ok(Some(summary))
 }
 
 #[tauri::command]
@@ -872,7 +830,6 @@ pub fn run_gui() -> Result<()> {
                 executable,
                 browser,
                 pending_private_key: Mutex::new(None),
-                pending_legacy_backup: Mutex::new(None),
                 owner_session: Mutex::new(OwnerSession::default()),
                 agent_registry,
                 tray_available: AtomicBool::new(false),
@@ -977,7 +934,6 @@ pub fn run_gui() -> Result<()> {
             open_browser_extension_folder,
             export_backup,
             import_backup,
-            import_legacy_backup,
             open_data_folder,
             window_action,
         ])

@@ -1,6 +1,6 @@
 use crate::{
-    crypto::{decrypt_backup, decrypt_bytes, encrypt_bytes},
-    model::{ImportSummary, PublicConnection, SecretBundle, SecretEnvelope},
+    crypto::{decrypt_bytes, encrypt_bytes},
+    model::{ImportSummary, PortableConnection, SecretBundle, SecretEnvelope},
     vault::Vault,
 };
 use anyhow::{Context, Result, bail};
@@ -11,25 +11,15 @@ use serde::{Deserialize, Serialize};
 use std::{fs, io::Write, path::Path};
 use zeroize::Zeroize;
 
-#[cfg(test)]
-use crate::crypto::encrypt_backup;
-
-const AUTOMATIC_BACKUP_AAD: &[u8] = b"mcp-vault/backup/v2";
+const AUTOMATIC_BACKUP_AAD: &[u8] = b"kru/backup/v3";
 
 #[derive(Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct BackupFile {
     format: String,
     version: u8,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    kdf: Option<String>,
     cipher: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    salt: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    unlock: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    unlock_key: Option<String>,
+    unlock_key: String,
     payload: SecretEnvelope,
 }
 
@@ -44,7 +34,7 @@ struct BackupPayload {
 
 #[derive(Serialize, Deserialize)]
 struct BackupConnection {
-    connection: PublicConnection,
+    connection: PortableConnection,
     secrets: SecretBundle,
 }
 
@@ -61,12 +51,9 @@ pub fn export_to_file(vault: &Vault, path: impl AsRef<Path>) -> Result<()> {
     key.zeroize();
     let file = BackupFile {
         format: "mcp-vault-backup".to_owned(),
-        version: 2,
-        kdf: None,
+        version: 3,
         cipher: "xchacha20poly1305".to_owned(),
-        salt: None,
-        unlock: Some("embedded-key".to_owned()),
-        unlock_key: Some(unlock_key),
+        unlock_key,
         payload,
     };
     write_backup_file(path.as_ref(), &file)
@@ -83,7 +70,7 @@ fn backup_payload(vault: &Vault) -> Result<BackupPayload> {
         .collect();
     Ok(BackupPayload {
         format: "mcp-vault-portable".to_owned(),
-        version: 2,
+        version: 3,
         created_at: Utc::now().to_rfc3339(),
         connections,
     })
@@ -121,39 +108,10 @@ fn reject_vault_internal_export_path(vault: &Vault, path: &Path) -> Result<()> {
     Ok(())
 }
 
-pub fn backup_requires_password(path: impl AsRef<Path>) -> Result<bool> {
-    let file = read_backup_file(path.as_ref())?;
-    validate_backup_file(&file)?;
-    Ok(file.version == 1)
-}
-
 pub fn import_from_file(vault: &Vault, path: impl AsRef<Path>) -> Result<ImportSummary> {
     let file = read_backup_file(path.as_ref())?;
     validate_backup_file(&file)?;
-    if file.version == 1 {
-        bail!("这是旧版密码备份，需要原备份密码")
-    }
     let mut plain = decrypt_automatic_backup(&file)?;
-    let result = merge_backup_payload(vault, &plain);
-    plain.zeroize();
-    result
-}
-
-pub fn import_legacy_from_file(
-    vault: &Vault,
-    path: impl AsRef<Path>,
-    password: &str,
-) -> Result<ImportSummary> {
-    let file = read_backup_file(path.as_ref())?;
-    validate_backup_file(&file)?;
-    if file.version != 1 {
-        bail!("该备份不需要密码")
-    }
-    if file.kdf.as_deref() != Some("argon2id") {
-        bail!("不支持的备份密钥派生方式")
-    }
-    let salt = file.salt.as_deref().context("旧版备份缺少 salt")?;
-    let mut plain = decrypt_backup(password, salt, &file.payload)?;
     let result = merge_backup_payload(vault, &plain);
     plain.zeroize();
     result
@@ -165,7 +123,7 @@ fn read_backup_file(path: &Path) -> Result<BackupFile> {
 }
 
 fn validate_backup_file(file: &BackupFile) -> Result<()> {
-    if file.format != "mcp-vault-backup" || !matches!(file.version, 1 | 2) {
+    if file.format != "mcp-vault-backup" || file.version != 3 {
         bail!("不支持的备份文件版本");
     }
     if file.cipher != "xchacha20poly1305" {
@@ -175,12 +133,8 @@ fn validate_backup_file(file: &BackupFile) -> Result<()> {
 }
 
 fn decrypt_automatic_backup(file: &BackupFile) -> Result<Vec<u8>> {
-    if file.version != 2 || file.unlock.as_deref() != Some("embedded-key") {
-        bail!("不支持的自动解锁备份格式")
-    }
-    let encoded = file.unlock_key.as_deref().context("备份缺少自动解锁材料")?;
     let decoded = STANDARD_NO_PAD
-        .decode(encoded)
+        .decode(&file.unlock_key)
         .context("备份自动解锁材料无效")?;
     let mut key: [u8; 32] = decoded
         .try_into()
@@ -192,7 +146,7 @@ fn decrypt_automatic_backup(file: &BackupFile) -> Result<Vec<u8>> {
 
 fn merge_backup_payload(vault: &Vault, plain: &[u8]) -> Result<ImportSummary> {
     let payload: BackupPayload = serde_json::from_slice(plain).context("备份内容损坏")?;
-    if payload.format != "mcp-vault-portable" || !matches!(payload.version, 1 | 2) {
+    if payload.format != "mcp-vault-portable" || payload.version != 3 {
         bail!("不支持的备份内容版本");
     }
     vault.merge_connections(
@@ -213,24 +167,27 @@ mod tests {
 
     fn input(id: Uuid, name: &str, token: &str) -> ConnectionInput {
         let mut secrets = SecretBundle::default();
-        secrets.token = Some(token.to_owned());
+        secrets
+            .named_secrets
+            .insert("apiCredential".into(), token.to_owned());
         ConnectionInput {
             id: Some(id),
-            kind: "api".into(),
-            capabilities: vec!["fill".into(), "http".into()],
-            modules: vec![],
+            modules: vec![
+                crate::model::ItemModule {
+                    kind: "url".into(),
+                    value: "https://api.example.test/v1/".into(),
+                    ..Default::default()
+                },
+                crate::model::ItemModule {
+                    kind: "apiCredential".into(),
+                    ..Default::default()
+                },
+            ],
             name: name.into(),
             enabled: true,
             description: String::new(),
-            host: String::new(),
-            port: 0,
-            username: String::new(),
-            auth_type: "bearer".into(),
-            ssh_auth_type: String::new(),
             http_auth_type: "bearer".into(),
             private_key_import_path: String::new(),
-            host_fingerprint: String::new(),
-            base_url: "https://api.example.test/v1/".into(),
             auth_header: "X-API-Key".into(),
             auth_location: "header".into(),
             auth_prefix: String::new(),
@@ -238,30 +195,9 @@ mod tests {
             allowed_methods: vec!["GET".into()],
             allowed_path_prefixes: vec!["/v1/".into()],
             test_path: String::new(),
-            cli: None,
-            browser: None,
-            credential: None,
-            secret: None,
             remove_secret_names: vec![],
             secrets,
         }
-    }
-
-    fn export_legacy_to_file(vault: &Vault, path: &Path, password: &str) {
-        let payload = backup_payload(vault).unwrap();
-        let plain = serde_json::to_vec(&payload).unwrap();
-        let (salt, payload) = encrypt_backup(password, &plain).unwrap();
-        let file = BackupFile {
-            format: "mcp-vault-backup".to_owned(),
-            version: 1,
-            kdf: Some("argon2id".to_owned()),
-            cipher: "xchacha20poly1305".to_owned(),
-            salt: Some(salt),
-            unlock: None,
-            unlock_key: None,
-            payload,
-        };
-        write_backup_file(path, &file).unwrap();
     }
 
     #[test]
@@ -281,9 +217,7 @@ mod tests {
         assert!(!contents.contains("marker-secret-123"));
         assert!(!contents.contains("private_key"));
         assert!(contents.contains("xchacha20poly1305"));
-        assert!(contents.contains("embedded-key"));
         assert!(contents.contains("unlockKey"));
-        assert!(!backup_requires_password(directory.path().join("test.mvault")).unwrap());
     }
 
     #[test]
@@ -295,41 +229,6 @@ mod tests {
             let error = export_to_file(&vault, vault.data_dir().join(name)).unwrap_err();
             assert!(error.to_string().contains("数据目录"));
         }
-    }
-
-    #[test]
-    fn legacy_password_backup_remains_importable() {
-        let directory = tempdir().unwrap();
-        let source = Vault::open(directory.path().join("legacy-source")).unwrap();
-        let target = Vault::open(directory.path().join("legacy-target")).unwrap();
-        let connection_id = Uuid::new_v4();
-        source
-            .save_connection(input(connection_id, "legacy-service", "legacy-secret-123"))
-            .unwrap();
-
-        let path = directory.path().join("legacy.mvault");
-        export_legacy_to_file(&source, &path, "legacy-password");
-        assert!(backup_requires_password(&path).unwrap());
-        assert!(
-            import_from_file(&target, &path)
-                .unwrap_err()
-                .to_string()
-                .contains("旧版密码")
-        );
-        assert!(import_legacy_from_file(&target, &path, "wrong-password").is_err());
-
-        let summary = import_legacy_from_file(&target, &path, "legacy-password").unwrap();
-        assert_eq!(summary.added, 1);
-        assert_eq!(summary.merged, 0);
-        assert_eq!(
-            target
-                .get_connection(connection_id)
-                .unwrap()
-                .secrets
-                .token
-                .as_deref(),
-            Some("legacy-secret-123")
-        );
     }
 
     #[test]
@@ -363,8 +262,7 @@ mod tests {
                 .get_connection(shared_id)
                 .unwrap()
                 .secrets
-                .token
-                .as_deref(),
+                .get("apiCredential"),
             Some("local-token-123")
         );
 

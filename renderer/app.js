@@ -109,9 +109,6 @@ const staticCopy = [
   ['.secret-hint', 'text', '当前项目的明文只在已解锁 GUI 中显示', 'Plaintext is visible only in the unlocked GUI.'],
   ['#connection-form .modal-footer [data-close-modal]', 'text', '取消', 'CANCEL'],
   ['#save-connection-button', 'text', '保存', 'SAVE'],
-  ['#backup-password', 'label', '旧版备份密码', 'LEGACY BACKUP PASSWORD'],
-  ['#backup-cancel', 'text', '取消', 'CANCEL'],
-  ['#backup-action', 'text', '继续', 'CONTINUE'],
 ];
 
 function applyLanguage() {
@@ -185,7 +182,6 @@ const api = {
   extensionFolder: () => invoke('open_browser_extension_folder'),
   exportBackup: () => invoke('export_backup'),
   importBackup: () => invoke('import_backup'),
-  importLegacyBackup: (password) => invoke('import_legacy_backup', { password }),
   dataFolder: () => invoke('open_data_folder'),
   window: (action) => invoke('window_action', { action }),
 };
@@ -909,21 +905,6 @@ function applyTemplate(template) {
   renderModules();
 }
 
-function legacyModules(item, ownerValues) {
-  const modules = [];
-  const add = (kind, name = kind, value = '') => { if (!modules.some((module) => module.kind === kind)) modules.push({ kind, name, value, secretValue: ownerValues[name] || '', configured: Boolean(ownerValues[name]), existing: true, agentVisible: defaultModuleAgentVisible(kind) }); };
-  if (item.host) { add('host', '', item.host); add('port', '', String(item.port || 22)); }
-  for (const field of item.secret?.fields || []) {
-    const kind = field.name === 'token' || field.name === 'apiKey' || field.name === 'api_key' ? 'apiCredential' : MODULE_DEFS[field.name] ? field.name : 'customSecret';
-    add(kind, kind === 'customSecret' ? field.name : kind, '');
-    const module = modules.at(-1);
-    module.secretValue = ownerValues[field.name] || ownerValues[kind] || '';
-    module.configured = Boolean(module.secretValue);
-  }
-  if (item.baseUrl) add('url', '', item.baseUrl);
-  return modules;
-}
-
 function updateAuthFields() {
   updateModuleStatus();
 }
@@ -959,7 +940,7 @@ async function openEditor(item = null, draft = null) {
   $('#modal-title').textContent = item ? localized('编辑项目', 'EDIT ITEM') : draft ? localized('继续草稿', 'CONTINUE DRAFT') : localized('添加项目', 'ADD ITEM');
   $('#template-picker').classList.toggle('hidden', Boolean(item || draft?.input?.modules?.length));
   currentModules = item
-    ? ((item.modules?.length ? item.modules : legacyModules(item, ownerValues)).map((module) => {
+    ? ((item.modules || []).map((module) => {
         const secretName = module.kind === 'customSecret' ? module.name : module.kind;
         return { ...module, secretValue: ownerValues[secretName] || '', configured: Boolean(module.configured || ownerValues[secretName]), existing: true, privateKeyName: module.kind === 'privateKey' ? item.privateKeyName || '' : '', pending: false, agentVisible: typeof module.agentVisible === 'boolean' ? module.agentVisible : defaultModuleAgentVisible(module.kind) };
       }))
@@ -1020,8 +1001,6 @@ function serializeItem(validate = true) {
     name,
     description: value('#connection-description'),
     enabled: $('#connection-enabled').checked,
-    authType: 'auto',
-    sshAuthType: '',
     httpAuthType: 'auto',
     privateKeyImportPath: collected.privateKeyImportPath,
     removeSecretNames: [...removedSecretFields],
@@ -1141,27 +1120,12 @@ async function setLanguage(next) {
     if (!$('#connection-modal').classList.contains('hidden')) {
       $('#modal-title').textContent = value('#connection-id') ? localized('编辑项目', 'EDIT ITEM') : currentDraftId ? localized('继续草稿', 'CONTINUE DRAFT') : localized('添加项目', 'ADD ITEM');
     }
-    if (!$('#backup-modal').classList.contains('hidden')) {
-      renderLegacyBackupModalCopy();
-    }
     try {
       state.settings = await api.settings({ language });
     } catch (error) {
       toast(cleanError(error), 'error');
     }
   }
-}
-
-function renderLegacyBackupModalCopy() {
-  $('#backup-title').textContent = localized('导入旧版备份', 'IMPORT LEGACY BACKUP');
-  $('#backup-description').textContent = localized('这个备份由旧版 KRU 使用独立密码加密。输入当时设置的密码以继续导入。', 'This backup was encrypted by an older KRU version with a separate password. Enter that password to continue.');
-}
-
-function openLegacyBackupPassword() {
-  renderLegacyBackupModalCopy();
-  value('#backup-password', '');
-  $('#backup-modal').classList.remove('hidden');
-  requestAnimationFrame(() => $('#backup-password').focus());
 }
 
 function toastImportSummary(summary) {
@@ -1185,11 +1149,7 @@ async function importBackup(button) {
   try {
     const result = await api.importBackup();
     if (!result) return;
-    if (result.legacyPasswordRequired) {
-      openLegacyBackupPassword();
-      return;
-    }
-    toastImportSummary(result.summary);
+    toastImportSummary(result);
     await refresh();
   } catch (error) {
     toast(cleanError(error), 'error');
@@ -1530,7 +1490,7 @@ document.addEventListener('keydown', (event) => {
     if (event.key === 'ArrowLeft' && index > 0) { event.preventDefault(); inputs[index - 1].focus(); return; }
     if (event.key === 'ArrowRight' && index < inputs.length - 1) { event.preventDefault(); inputs[index + 1].focus(); return; }
   }
-  const pageSearchAvailable = $('#connection-modal').classList.contains('hidden') && $('#backup-modal').classList.contains('hidden') && $('#owner-lock-layer').classList.contains('hidden');
+  const pageSearchAvailable = $('#connection-modal').classList.contains('hidden') && $('#owner-lock-layer').classList.contains('hidden');
   if (pageSearchAvailable && (event.ctrlKey || event.metaKey) && event.key.toLowerCase() === 'f' && !event.altKey) {
     event.preventDefault();
     const search = $(`[data-page-search="${activePage}"]`);
@@ -1623,23 +1583,6 @@ $('#open-data-button').addEventListener('click', () => api.dataFolder().catch((e
 $('#rescan-agents').addEventListener('click', () => scanAgents(true));
 $('#header-export-backup-button').addEventListener('click', (event) => exportBackup(event.currentTarget));
 $('#header-import-backup-button').addEventListener('click', (event) => importBackup(event.currentTarget));
-$('#backup-cancel').addEventListener('click', () => $('#backup-modal').classList.add('hidden'));
-$('#backup-action').addEventListener('click', async () => {
-  const password = value('#backup-password');
-  if (password.length < 8) return toast(localized('旧版备份密码至少 8 位', 'Legacy backup password must be at least 8 characters'), 'error');
-  const button = $('#backup-action');
-  button.disabled = true;
-  try {
-    const summary = await api.importLegacyBackup(password);
-    $('#backup-modal').classList.add('hidden');
-    toastImportSummary(summary);
-    await refresh();
-  } catch (error) {
-    toast(cleanError(error), 'error');
-  } finally {
-    button.disabled = false;
-  }
-});
 
 $('#page-activity .activity-panel').addEventListener('scroll', (event) => {
   const panel = event.currentTarget;

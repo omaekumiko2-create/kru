@@ -166,37 +166,37 @@ function mcpSmoke() {
       const toolList = await request(2, "tools/list");
       const toolNames = toolList.tools?.map((tool) => tool.name) ?? [];
       const expectedTools = [
-        "vault_items_list",
-        "secret_fill",
-        "terminal_open",
-        "terminal_input",
+        "items_search",
+        "credential_fill",
+        "terminal_start",
+        "terminal_write",
         "terminal_read",
-        "terminal_close",
-        "ssh_execute",
-        "api_request",
+        "terminal_stop",
+        "ssh_run",
+        "http_send",
       ];
       for (const toolName of expectedTools) {
         assert.ok(toolNames.includes(toolName), `${toolName} is missing`);
       }
 
       const listResult = await request(3, "tools/call", {
-        name: "vault_items_list",
+        name: "items_search",
         arguments: {},
       });
-      assert.ok(Array.isArray(listResult.content), "vault_items_list returned no MCP content");
-      assert.notEqual(listResult.isError, true, "vault_items_list returned an MCP error");
+      assert.ok(Array.isArray(listResult.content), "items_search returned no MCP content");
+      assert.notEqual(listResult.isError, true, "items_search returned an MCP error");
       const textBlock = listResult.content.find((block) => block.type === "text");
-      assert.ok(textBlock?.text, "vault_items_list returned no text payload");
+      assert.ok(textBlock?.text, "items_search returned no text payload");
       const textPayload = JSON.parse(textBlock.text);
       assert.deepEqual(
         textPayload,
-        { count: 0, query: null, items: [] },
+        { items: [] },
         "smoke vault was not empty",
       );
       assert.deepEqual(
         listResult.structuredContent,
         textPayload,
-        "vault_items_list text and structured content differ",
+        "items_search text and structured content differ",
       );
       completed = true;
       child.stdin.end();

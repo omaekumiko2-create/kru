@@ -1,6 +1,6 @@
 {
   "name": "kru",
-  "version": "0.12.0",
+  "version": "0.13.0",
   "private": true,
   "description": "KRU — a local credential relay unit for AI agents.",
   "scripts": {

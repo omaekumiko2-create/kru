@@ -75,7 +75,7 @@ KRU registers a local `stdio` MCP command. The MCP process starts on demand when
 | **HTTP** | The item contains an API credential | KRU injects authentication and sends the constrained request |
 | **Terminal** | The agent opens a managed terminal | KRU can write a selected secret without returning it to the agent |
 
-An item may advertise more than one action. KRU has no observation, diagnostic, restricted, or execution mode: if `ssh_execute` is available, the agent sends the command the task actually requires.
+An item may advertise more than one action. KRU has no observation, diagnostic, restricted, or execution mode: if `ssh_run` is available, the agent sends the command the task actually requires.
 
 ## Plaintext visibility is per module
 
@@ -152,24 +152,24 @@ Exported `.mvault` packages are encrypted and portable, but they contain their o
 
 ## MCP surface
 
-KRU's server instructions use one consistent workflow: discover credentials with `vault_items_list`, pass the known item name as `query`, and call only an action advertised by that item. Hidden plaintext must never be requested from the user, and KRU has no invented observation, diagnostic, or execution modes.
+KRU 0.13 exposes one strict MCP surface: discover credentials with `items_search`, pass the known item name as `query`, and call only an action advertised by that item. Hidden plaintext must never be requested from the user, and KRU has no invented observation, diagnostic, or execution modes. Unknown fields and retired tool names are rejected.
 
 | Tool | Purpose | MCP impact hint |
 | --- | --- | --- |
-| `vault_items_list(query?)` | Find usable items, modules, targets, and actions | Read-only, idempotent, local |
-| `secret_fill` | Write one saved value into an approved local target | Changes local state |
-| `ssh_execute` | Run the requested command through a stored SSH identity | External effects possible |
-| `api_request` | Send an authenticated, policy-checked HTTP request | External effects possible |
-| `terminal_open` | Start a managed local process | Changes local state |
-| `terminal_input` | Write ordinary input or a selected saved value | External effects possible |
+| `items_search(query?)` | Find usable items, modules, and advertised actions | Read-only, idempotent, local |
+| `credential_fill` | Write one saved module into an approved local target | Changes local state |
+| `ssh_run` | Run the requested command through a stored SSH identity | External effects possible |
+| `http_send` | Send an authenticated, policy-checked HTTP request to one absolute URL | External effects possible |
+| `terminal_start` | Start a managed local process | Changes local state |
+| `terminal_write` | Write ordinary input into a managed terminal | External effects possible |
 | `terminal_read` | Read redacted managed-terminal output | Read-only, idempotent, local |
-| `terminal_close` | Close a managed terminal session | Idempotent state change |
+| `terminal_stop` | Close a managed terminal session | Idempotent state change |
 
-With no `query`, `vault_items_list` returns all usable items. With one, an exact case-insensitive name match wins; otherwise KRU returns names containing the query. This keeps unrelated credential metadata out of the Agent context when the item is already known.
+With no `query`, `items_search` returns all usable items. With one, an exact case-insensitive name match wins; otherwise KRU returns names containing the query. This keeps unrelated credential metadata out of the Agent context when the item is already known.
 
-Every successful tool call returns both typed `structuredContent` and equivalent JSON text for older MCP clients. Business failures return an MCP tool result with `isError=true`; malformed protocol input remains a protocol error. Tool annotations help clients describe impact, but all real security restrictions are enforced by KRU's backend.
+Every successful tool call returns typed `structuredContent` and equivalent JSON text. Business failures return an MCP tool result with `isError=true`; malformed protocol input remains a protocol error. Tool annotations help clients describe impact, but all real security restrictions are enforced by KRU's backend.
 
-There is no unrestricted `get_secret` tool. `vault_items_list` returns item and module metadata, non-secret target information, and derived actions. A credential value is included only when its Agent visibility switch is on.
+There is no unrestricted `get_secret` tool. `items_search` returns item and module metadata plus advertised actions. A credential value is included only when its Agent visibility switch is on.
 
 Manual `stdio` configuration:
 

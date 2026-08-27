@@ -19,8 +19,9 @@ use rmcp::{
 };
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
-use serde_json::json;
+use serde_json::{Value, json};
 use std::{
+    collections::HashMap,
     path::Path,
     sync::{Arc, RwLock},
     time::Instant,
@@ -115,7 +116,7 @@ impl VaultMcp {
         }
     }
 
-    fn list_items(&self, input: VaultItemsListInput) -> Result<VaultItemsListOutput, String> {
+    fn search_items(&self, input: ItemsSearchInput) -> Result<ItemsSearchOutput, String> {
         let query = input
             .query
             .map(|value| value.trim().to_owned())
@@ -147,13 +148,12 @@ impl VaultMcp {
 
         let items = connections
             .into_iter()
-            .map(|decrypted| -> Result<VaultItemOutput, String> {
-                let item = decrypted.stored.public(Some(&decrypted.secrets));
+            .map(|decrypted| -> Result<ItemOutput, String> {
                 let modules = decrypted
                     .stored
                     .modules
                     .iter()
-                    .map(|module| -> Result<VaultModuleOutput, String> {
+                    .map(|module| -> Result<ItemModuleOutput, String> {
                         let agent_visible = module.agent_visible();
                         let configured = if let Some(name) = module.secret_name() {
                             decrypted.secrets.get(name).is_some()
@@ -173,98 +173,34 @@ impl VaultMcp {
                         } else {
                             None
                         };
-                        Ok(VaultModuleOutput {
+                        Ok(ItemModuleOutput {
                             kind: module.kind.clone(),
                             name: module.name.clone(),
-                            secret: module.is_secret(),
                             configured,
                             agent_visible,
                             value,
                         })
                     })
                     .collect::<Result<Vec<_>, _>>()?;
-                let fields = item
-                    .secret
-                    .as_ref()
-                    .map(|profile| {
-                        profile
-                            .fields
-                            .iter()
-                            .map(|field| VaultFieldOutput {
-                                name: field.name.clone(),
-                                field_type: field.kind.clone(),
-                                agent_visible: decrypted
-                                    .stored
-                                    .modules
-                                    .iter()
-                                    .find(|module| {
-                                        module.secret_name() == Some(field.name.as_str())
-                                    })
-                                    .is_some_and(|module| module.agent_visible()),
-                            })
-                            .collect::<Vec<_>>()
-                    })
-                    .unwrap_or_default();
-                let has_ssh = item.capabilities.iter().any(|value| value == "ssh");
-                let has_http = item.capabilities.iter().any(|value| value == "http");
                 let mut actions = Vec::new();
-                if item.capabilities.iter().any(|value| value == "fill") {
-                    actions.push("secret_fill".to_owned());
+                if decrypted.stored.has_capability("fill") {
+                    actions.push("credential_fill".to_owned());
                 }
-                let ssh = has_ssh.then(|| VaultSshTargetOutput {
-                    host: decrypted
-                        .stored
-                        .modules
-                        .iter()
-                        .find(|module| module.kind == "host")
-                        .is_some_and(|module| module.agent_visible())
-                        .then(|| item.host.clone()),
-                    port: decrypted
-                        .stored
-                        .modules
-                        .iter()
-                        .find(|module| module.kind == "port")
-                        .is_some_and(|module| module.agent_visible())
-                        .then_some(item.port),
-                });
-                if has_ssh {
-                    actions.push("ssh_execute".to_owned());
+                if decrypted.stored.has_capability("ssh") {
+                    actions.push("ssh_run".to_owned());
                 }
-                let http = has_http.then(|| {
-                    let url_visible = decrypted
-                        .stored
-                        .modules
-                        .iter()
-                        .find(|module| module.kind == "url")
-                        .is_some_and(|module| module.agent_visible());
-                    VaultHttpTargetOutput {
-                        runtime_url_required: item.base_url.is_empty(),
-                        methods: item.allowed_methods.clone(),
-                        path_prefixes: item.allowed_path_prefixes.clone(),
-                        base_url: url_visible.then(|| item.base_url.clone()),
-                    }
-                });
-                if has_http {
-                    actions.push("api_request".to_owned());
+                if decrypted.stored.has_capability("http") {
+                    actions.push("http_send".to_owned());
                 }
-                Ok(VaultItemOutput {
-                    id: item.id,
-                    name: item.name,
-                    item_type: "item".to_owned(),
-                    capabilities: item.capabilities,
+                Ok(ItemOutput {
+                    id: decrypted.stored.id,
+                    name: decrypted.stored.name,
                     modules,
-                    description: item.description,
-                    fields,
-                    target: VaultTargetOutput { ssh, http },
                     actions,
                 })
             })
             .collect::<Result<Vec<_>, _>>()?;
-        Ok(VaultItemsListOutput {
-            count: items.len(),
-            query,
-            items,
-        })
+        Ok(ItemsSearchOutput { items })
     }
 }
 
@@ -292,8 +228,8 @@ fn into_tool_result<T: Serialize>(result: Result<T, String>) -> CallToolResult {
 }
 
 #[derive(Debug, Default, Deserialize, JsonSchema)]
-#[serde(rename_all = "camelCase")]
-struct VaultItemsListInput {
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct ItemsSearchInput {
     #[serde(default)]
     #[schemars(
         description = "Optional project-name query. Exact case-insensitive matches win; otherwise KRU returns project names containing the query."
@@ -303,34 +239,25 @@ struct VaultItemsListInput {
 
 #[derive(Debug, Serialize, JsonSchema)]
 #[serde(rename_all = "camelCase")]
-struct VaultItemsListOutput {
-    count: usize,
-    query: Option<String>,
-    items: Vec<VaultItemOutput>,
+struct ItemsSearchOutput {
+    items: Vec<ItemOutput>,
 }
 
 #[derive(Debug, Serialize, JsonSchema)]
 #[serde(rename_all = "camelCase")]
-struct VaultItemOutput {
+struct ItemOutput {
     #[schemars(with = "String")]
     id: Uuid,
     name: String,
-    #[serde(rename = "type")]
-    item_type: String,
-    capabilities: Vec<String>,
-    modules: Vec<VaultModuleOutput>,
-    description: String,
-    fields: Vec<VaultFieldOutput>,
-    target: VaultTargetOutput,
+    modules: Vec<ItemModuleOutput>,
     actions: Vec<String>,
 }
 
 #[derive(Debug, Serialize, JsonSchema)]
 #[serde(rename_all = "camelCase")]
-struct VaultModuleOutput {
+struct ItemModuleOutput {
     kind: String,
     name: String,
-    secret: bool,
     configured: bool,
     agent_visible: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -339,47 +266,9 @@ struct VaultModuleOutput {
 
 #[derive(Debug, Serialize, JsonSchema)]
 #[serde(rename_all = "camelCase")]
-struct VaultFieldOutput {
-    name: String,
-    #[serde(rename = "type")]
-    field_type: String,
-    agent_visible: bool,
-}
-
-#[derive(Debug, Serialize, JsonSchema)]
-#[serde(rename_all = "camelCase")]
-struct VaultTargetOutput {
-    #[serde(skip_serializing_if = "Option::is_none")]
-    ssh: Option<VaultSshTargetOutput>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    http: Option<VaultHttpTargetOutput>,
-}
-
-#[derive(Debug, Serialize, JsonSchema)]
-#[serde(rename_all = "camelCase")]
-struct VaultSshTargetOutput {
-    #[serde(skip_serializing_if = "Option::is_none")]
-    host: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    port: Option<u16>,
-}
-
-#[derive(Debug, Serialize, JsonSchema)]
-#[serde(rename_all = "camelCase")]
-struct VaultHttpTargetOutput {
-    runtime_url_required: bool,
-    methods: Vec<String>,
-    path_prefixes: Vec<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    base_url: Option<String>,
-}
-
-#[derive(Debug, Serialize, JsonSchema)]
-#[serde(rename_all = "camelCase")]
-struct SecretFillOutput {
-    ok: bool,
+struct CredentialFillOutput {
     target: String,
-    field: String,
+    module: String,
 }
 
 #[derive(Debug, Serialize, JsonSchema)]
@@ -389,12 +278,10 @@ struct OkOutput {
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
-#[serde(rename_all = "camelCase")]
-struct SshExecuteInput {
-    #[schemars(
-        description = "Item ID returned by vault_items_list for an item advertising the derived ssh_execute action."
-    )]
-    connection_id: String,
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct SshRunInput {
+    #[schemars(description = "Item ID returned by items_search for an item advertising ssh_run.")]
+    item_id: String,
     #[schemars(description = "One command to execute.")]
     command: String,
     #[serde(default)]
@@ -403,37 +290,53 @@ struct SshExecuteInput {
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
-#[serde(rename_all = "camelCase")]
-struct ApiToolInput {
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct HttpSendInput {
     #[schemars(
-        description = "Item ID returned by vault_items_list for an item advertising the derived api_request action."
+        description = "Item ID returned by items_search for an item advertising http_send."
     )]
-    connection_id: String,
-    #[serde(flatten)]
-    request: ApiRequestInput,
+    item_id: String,
+    #[schemars(description = "Absolute request URL.")]
+    url: String,
+    #[serde(default = "default_http_method")]
+    #[schemars(description = "HTTP method. Defaults to GET.")]
+    method: String,
+    #[serde(default)]
+    #[schemars(description = "Query parameters appended to the URL.")]
+    query: HashMap<String, Value>,
+    #[serde(default)]
+    #[schemars(description = "Non-authentication request headers.")]
+    headers: HashMap<String, String>,
+    #[serde(default)]
+    #[schemars(description = "Optional JSON request body.")]
+    body: Option<Value>,
+}
+
+fn default_http_method() -> String {
+    "GET".to_owned()
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
-#[serde(rename_all = "camelCase")]
-struct SecretFillInput {
-    #[schemars(description = "Item ID returned by vault_items_list.")]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct CredentialFillInput {
+    #[schemars(description = "Item ID returned by items_search.")]
     item_id: String,
-    #[schemars(description = "Secret field name returned by vault_items_list.")]
-    field: String,
+    #[schemars(description = "Module name returned by items_search.")]
+    module: String,
     #[schemars(
         description = "Write target: browser (paired extension; recommended for reliable browser automation), desktop (only when the real operating-system foreground focus is guaranteed), or terminal."
     )]
     target: String,
     #[serde(default)]
     #[schemars(
-        description = "Required when target=terminal; use the session ID returned by terminal_open."
+        description = "Required when target=terminal; use the session ID returned by terminal_start."
     )]
     session_id: Option<String>,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
-#[serde(rename_all = "camelCase")]
-struct TerminalOpenInput {
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct TerminalStartInput {
     #[schemars(
         description = "Program name or path selected by the agent. KRU starts it directly without a shell."
     )]
@@ -447,16 +350,16 @@ struct TerminalOpenInput {
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
-#[serde(rename_all = "camelCase")]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct TerminalSessionInput {
-    #[schemars(description = "Session ID returned by terminal_open.")]
+    #[schemars(description = "Session ID returned by terminal_start.")]
     session_id: String,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
-#[serde(rename_all = "camelCase")]
-struct TerminalInputInput {
-    #[schemars(description = "Session ID returned by terminal_open.")]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct TerminalWriteInput {
+    #[schemars(description = "Session ID returned by terminal_start.")]
     session_id: String,
     #[schemars(
         description = "Ordinary terminal input. Append a newline when the agent intends to press Enter."
@@ -467,36 +370,39 @@ struct TerminalInputInput {
 #[tool_router(router = tool_router)]
 impl VaultMcp {
     #[tool(
-        name = "vault_items_list",
+        name = "items_search",
         description = "Discover enabled KRU projects and their available actions. Call this first for tasks involving credentials, authentication, SSH, VPS access, API credentials, private keys, passphrases, or TOTP. When the user names a project, pass that name as query. Exact case-insensitive name matches win; otherwise KRU returns names containing the query. Only modules explicitly marked agentVisible include value.",
-        output_schema = rmcp::handler::server::tool::schema_for_type::<VaultItemsListOutput>(),
+        output_schema = rmcp::handler::server::tool::schema_for_type::<ItemsSearchOutput>(),
         annotations(title = "Find KRU projects", read_only_hint = true, destructive_hint = false, idempotent_hint = true, open_world_hint = false)
     )]
-    async fn vault_items_list(
+    async fn items_search(
         &self,
-        Parameters(input): Parameters<VaultItemsListInput>,
+        Parameters(input): Parameters<ItemsSearchInput>,
     ) -> CallToolResult {
-        into_tool_result(self.list_items(input))
+        into_tool_result(self.search_items(input))
     }
 
     #[tool(
-        name = "secret_fill",
-        description = "Write one stored field to a paired browser, the real operating-system foreground control, or a KRU-managed terminal without returning hidden plaintext. Call vault_items_list first. Prefer browser for browser automation. KRU never submits or presses Enter.",
-        output_schema = rmcp::handler::server::tool::schema_for_type::<SecretFillOutput>(),
+        name = "credential_fill",
+        description = "Write one stored module to a paired browser, the real operating-system foreground control, or a KRU-managed terminal without returning hidden plaintext. Call items_search first. Prefer browser for browser automation. KRU never submits or presses Enter.",
+        output_schema = rmcp::handler::server::tool::schema_for_type::<CredentialFillOutput>(),
         annotations(title = "Fill a credential", read_only_hint = false, destructive_hint = false, idempotent_hint = false, open_world_hint = true)
     )]
-    async fn secret_fill(&self, Parameters(input): Parameters<SecretFillInput>) -> CallToolResult {
-        let result: Result<SecretFillOutput, String> = async {
+    async fn credential_fill(
+        &self,
+        Parameters(input): Parameters<CredentialFillInput>,
+    ) -> CallToolResult {
+        let result: Result<CredentialFillOutput, String> = async {
             let item_id = Uuid::parse_str(&input.item_id).map_err(|_| "项目 ID 无效".to_owned())?;
             let target = match input.target.as_str() {
                 "browser" | "desktop" | "terminal" => input.target,
                 _ => return Err("target 必须是 browser、desktop 或 terminal".to_owned()),
             };
-            let field = input.field;
-            self.track(item_id, format!("向 {target} 填写字段 {field}"), async {
+            let module = input.module;
+            self.track(item_id, format!("向 {target} 填写模块 {module}"), async {
                 let (_, kind, mut value) = self
                     .vault
-                    .get_secret_value(item_id, &field)
+                    .get_secret_value(item_id, &module)
                     .map_err(|error| anyhow::anyhow!(error))?;
                 if kind == "totp" {
                     value = current_totp(&value)?;
@@ -527,25 +433,21 @@ impl VaultMcp {
                 Ok(())
             })
             .await?;
-            Ok(SecretFillOutput {
-                ok: true,
-                target,
-                field,
-            })
+            Ok(CredentialFillOutput { target, module })
         }
         .await;
         into_tool_result(result)
     }
 
     #[tool(
-        name = "terminal_open",
+        name = "terminal_start",
         description = "Start a program directly in a KRU-managed local PTY. The caller chooses the program and argv; no shell is inserted.",
         output_schema = rmcp::handler::server::tool::schema_for_type::<TerminalOpenResult>(),
         annotations(title = "Open a managed terminal", read_only_hint = false, destructive_hint = false, idempotent_hint = false, open_world_hint = true)
     )]
-    async fn terminal_open(
+    async fn terminal_start(
         &self,
-        Parameters(input): Parameters<TerminalOpenInput>,
+        Parameters(input): Parameters<TerminalStartInput>,
     ) -> CallToolResult {
         into_tool_result(
             self.terminal
@@ -555,14 +457,14 @@ impl VaultMcp {
     }
 
     #[tool(
-        name = "terminal_input",
-        description = "Write ordinary text to a KRU-managed PTY. secret_fill never adds a newline, so send a newline separately only when submission is intended.",
+        name = "terminal_write",
+        description = "Write ordinary text to a KRU-managed PTY. credential_fill never adds a newline, so send a newline separately only when submission is intended.",
         output_schema = rmcp::handler::server::tool::schema_for_type::<OkOutput>(),
         annotations(title = "Write terminal input", read_only_hint = false, destructive_hint = true, idempotent_hint = false, open_world_hint = true)
     )]
-    async fn terminal_input(
+    async fn terminal_write(
         &self,
-        Parameters(input): Parameters<TerminalInputInput>,
+        Parameters(input): Parameters<TerminalWriteInput>,
     ) -> CallToolResult {
         let result = Uuid::parse_str(&input.session_id)
             .map_err(|_| "终端会话 ID 无效".to_owned())
@@ -596,12 +498,12 @@ impl VaultMcp {
     }
 
     #[tool(
-        name = "terminal_close",
+        name = "terminal_stop",
         description = "Close and clean up a KRU-managed PTY, terminating the program if it is still running.",
         output_schema = rmcp::handler::server::tool::schema_for_type::<OkOutput>(),
         annotations(title = "Close a managed terminal", read_only_hint = false, destructive_hint = true, idempotent_hint = true, open_world_hint = false)
     )]
-    async fn terminal_close(
+    async fn terminal_stop(
         &self,
         Parameters(input): Parameters<TerminalSessionInput>,
     ) -> CallToolResult {
@@ -617,24 +519,23 @@ impl VaultMcp {
     }
 
     #[tool(
-        name = "ssh_execute",
-        description = "Execute the command the user requested on an SSH host stored in KRU. Call vault_items_list first and use only a project advertising ssh_execute. KRU authenticates locally; this action represents full command authority for that project. KRU has no observation, diagnostic, restricted, or execution mode.",
+        name = "ssh_run",
+        description = "Execute the command the user requested on an SSH host stored in KRU. Call items_search first and use only a project advertising ssh_run. KRU authenticates locally; this action represents full command authority for that project. KRU has no observation, diagnostic, restricted, or execution mode.",
         output_schema = rmcp::handler::server::tool::schema_for_type::<SshResponse>(),
         annotations(title = "Execute an SSH command", read_only_hint = false, destructive_hint = true, idempotent_hint = false, open_world_hint = true)
     )]
-    async fn ssh_execute(&self, Parameters(input): Parameters<SshExecuteInput>) -> CallToolResult {
+    async fn ssh_run(&self, Parameters(input): Parameters<SshRunInput>) -> CallToolResult {
         let result: Result<SshResponse, String> = async {
-            let connection_id =
-                Uuid::parse_str(&input.connection_id).map_err(|_| "连接 ID 无效".to_owned())?;
+            let item_id = Uuid::parse_str(&input.item_id).map_err(|_| "项目 ID 无效".to_owned())?;
             let connection = self
                 .vault
-                .get_connection(connection_id)
+                .get_connection(item_id)
                 .map_err(|error| error.to_string())?;
             if !connection.stored.has_capability("ssh") {
                 return Err("所选项目的模块尚未形成可用 SSH 动作".to_owned());
             }
             self.track(
-                connection_id,
+                item_id,
                 "执行 SSH 命令".to_owned(),
                 execute_ssh(
                     &self.vault,
@@ -650,29 +551,31 @@ impl VaultMcp {
     }
 
     #[tool(
-        name = "api_request",
-        description = "Send an authenticated API request through KRU without returning hidden credential plaintext. Call vault_items_list first and use only a project advertising api_request. A saved URL locks requests to the same origin. Without a saved URL, provide an absolute HTTPS URL; HTTP is allowed only for loopback addresses. Redirects and caller-supplied authentication headers are blocked.",
+        name = "http_send",
+        description = "Send an authenticated HTTP request through KRU without returning hidden credential plaintext. Call items_search first and use only a project advertising http_send. Provide one absolute URL. A saved service URL locks requests to the same origin. Without one, HTTPS is required except for loopback HTTP. Redirects and caller-supplied authentication headers are blocked.",
         output_schema = rmcp::handler::server::tool::schema_for_type::<ApiResponse>(),
         annotations(title = "Send an authenticated API request", read_only_hint = false, destructive_hint = true, idempotent_hint = false, open_world_hint = true)
     )]
-    async fn api_request(&self, Parameters(input): Parameters<ApiToolInput>) -> CallToolResult {
+    async fn http_send(&self, Parameters(input): Parameters<HttpSendInput>) -> CallToolResult {
         let result: Result<ApiResponse, String> = async {
-            let connection_id =
-                Uuid::parse_str(&input.connection_id).map_err(|_| "连接 ID 无效".to_owned())?;
+            let item_id = Uuid::parse_str(&input.item_id).map_err(|_| "项目 ID 无效".to_owned())?;
             let connection = self
                 .vault
-                .get_connection(connection_id)
+                .get_connection(item_id)
                 .map_err(|error| error.to_string())?;
             if !connection.stored.has_capability("http") {
                 return Err("所选项目的模块尚未形成可用 HTTP 动作".to_owned());
             }
-            let action = describe_api_request(&connection.stored, &input.request);
-            self.track(
-                connection_id,
-                action,
-                execute_api(&connection, input.request),
-            )
-            .await
+            let request = ApiRequestInput {
+                url: input.url,
+                method: input.method,
+                query: input.query,
+                headers: input.headers,
+                body: input.body,
+            };
+            let action = describe_api_request(&request);
+            self.track(item_id, action, execute_api(&connection, request))
+                .await
         }
         .await;
         into_tool_result(result)
@@ -683,7 +586,7 @@ impl VaultMcp {
 impl ServerHandler for VaultMcp {
     fn get_info(&self) -> ServerInfo {
         ServerInfo::new(ServerCapabilities::builder().enable_tools().build()).with_instructions(
-            "KRU is a local, non-agentic credential execution tool. Before asking the user to provide a credential, call vault_items_list. When the user names a KRU project, pass that name as query and prefer the exact match. Use only actions advertised by the selected project. A module includes value only when the user explicitly made it agent-visible; never request, guess, or try to extract a missing value. Let KRU perform hidden authentication through secret_fill, ssh_execute, or api_request. KRU has no observation, diagnostic, restricted, or execution mode. For browser automation, prefer secret_fill with target=browser and the paired extension. Use target=desktop only when the real operating-system foreground focus is guaranteed. KRU never submits a filled value automatically.",
+            "KRU is a local, non-agentic credential execution tool. Before asking the user to provide a credential, call items_search. When the user names a KRU project, pass that name as query and prefer the exact match. Use only actions advertised by the selected project. A module includes value only when the user explicitly made it agent-visible; never request, guess, or try to extract a missing value. Let KRU perform hidden authentication through credential_fill, ssh_run, or http_send. KRU has no observation, diagnostic, restricted, or execution mode. For browser automation, prefer credential_fill with target=browser and the paired extension. Use target=desktop only when the real operating-system foreground focus is guaranteed. KRU never submits a filled value automatically.",
         )
     }
 
@@ -829,9 +732,7 @@ fn toml_escape(value: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::model::{
-        ConnectionInput, ItemModule, NamedSecrets, SecretBundle, SecretField, SecretProfile,
-    };
+    use crate::model::{ConnectionInput, ItemModule, NamedSecrets, SecretBundle};
     use tempfile::tempdir;
 
     fn structured_value(result: &CallToolResult) -> serde_json::Value {
@@ -896,8 +797,6 @@ mod tests {
         let saved = vault
             .save_connection(ConnectionInput {
                 id: None,
-                kind: "secret".into(),
-                capabilities: vec!["fill".into()],
                 modules: vec![
                     ItemModule {
                         kind: "username".into(),
@@ -933,15 +832,8 @@ mod tests {
                 name: "test login".into(),
                 enabled: true,
                 description: String::new(),
-                host: String::new(),
-                port: 0,
-                username: String::new(),
-                auth_type: String::new(),
-                ssh_auth_type: String::new(),
                 http_auth_type: String::new(),
                 private_key_import_path: String::new(),
-                host_fingerprint: String::new(),
-                base_url: String::new(),
                 auth_header: String::new(),
                 auth_location: String::new(),
                 auth_prefix: String::new(),
@@ -949,25 +841,6 @@ mod tests {
                 allowed_methods: vec![],
                 allowed_path_prefixes: vec![],
                 test_path: String::new(),
-                cli: None,
-                browser: None,
-                credential: None,
-                secret: Some(SecretProfile {
-                    fields: vec![
-                        SecretField {
-                            name: "username".into(),
-                            kind: "text".into(),
-                        },
-                        SecretField {
-                            name: "password".into(),
-                            kind: "text".into(),
-                        },
-                        SecretField {
-                            name: "totp".into(),
-                            kind: "totp".into(),
-                        },
-                    ],
-                }),
                 remove_secret_names: vec![],
                 secrets,
             })
@@ -975,24 +848,25 @@ mod tests {
 
         let mcp = VaultMcp::new(vault.clone());
         let output = mcp
-            .vault_items_list(Parameters(VaultItemsListInput::default()))
+            .items_search(Parameters(ItemsSearchInput::default()))
             .await;
         let listed = structured_value(&output);
         let text = serde_json::to_string(&listed).unwrap();
         assert!(text.contains("username"));
         assert!(text.contains("password"));
-        assert_eq!(listed["items"][0]["type"], "item");
-        assert_eq!(listed["items"][0]["capabilities"], json!(["fill", "ssh"]));
         assert_eq!(
-            listed["items"][0]["target"]["ssh"]["host"],
-            "ssh.example.test"
+            listed["items"][0]["actions"],
+            json!(["credential_fill", "ssh_run"])
         );
-        assert_eq!(listed["items"][0]["target"]["ssh"]["port"], 22);
-        assert!(listed["items"][0]["target"]["ssh"].get("mode").is_none());
+        for removed in ["type", "capabilities", "description", "fields", "target"] {
+            assert!(
+                listed["items"][0].get(removed).is_none(),
+                "legacy field {removed} remains"
+            );
+        }
         assert!(
-            listed["items"][0]["target"]["ssh"]
-                .get("allowedCommands")
-                .is_none()
+            listed["items"][0]["modules"][0].get("secret").is_none(),
+            "module output still exposes the removed secret projection"
         );
         assert!(text.contains("mcp-visible-user-marker"));
         assert!(!text.contains("mcp-hidden-password-marker"));
@@ -1011,33 +885,33 @@ mod tests {
         );
 
         let exact = structured_value(
-            &mcp.vault_items_list(Parameters(VaultItemsListInput {
+            &mcp.items_search(Parameters(ItemsSearchInput {
                 query: Some("TEST LOGIN".into()),
             }))
             .await,
         );
-        assert_eq!(exact["count"], 1);
+        assert_eq!(exact["items"].as_array().unwrap().len(), 1);
         assert_eq!(exact["items"][0]["name"], "test login");
 
         let partial = structured_value(
-            &mcp.vault_items_list(Parameters(VaultItemsListInput {
+            &mcp.items_search(Parameters(ItemsSearchInput {
                 query: Some("login".into()),
             }))
             .await,
         );
-        assert_eq!(partial["count"], 1);
+        assert_eq!(partial["items"].as_array().unwrap().len(), 1);
 
         let missing = structured_value(
-            &mcp.vault_items_list(Parameters(VaultItemsListInput {
+            &mcp.items_search(Parameters(ItemsSearchInput {
                 query: Some("does not exist".into()),
             }))
             .await,
         );
-        assert_eq!(missing["count"], 0);
+        assert!(missing["items"].as_array().unwrap().is_empty());
 
         vault.set_connection_enabled(saved.id, false).unwrap();
         let hidden = VaultMcp::new(vault)
-            .vault_items_list(Parameters(VaultItemsListInput::default()))
+            .items_search(Parameters(ItemsSearchInput::default()))
             .await;
         let hidden = serde_json::to_string(&structured_value(&hidden)).unwrap();
         assert!(!hidden.contains("test login"));
@@ -1049,14 +923,14 @@ mod tests {
     fn tool_contracts_have_output_schemas_and_annotations() {
         let router = VaultMcp::tool_router();
         let expected = [
-            ("vault_items_list", true, false, true, false),
-            ("secret_fill", false, false, false, true),
-            ("terminal_open", false, false, false, true),
-            ("terminal_input", false, true, false, true),
+            ("items_search", true, false, true, false),
+            ("credential_fill", false, false, false, true),
+            ("terminal_start", false, false, false, true),
+            ("terminal_write", false, true, false, true),
             ("terminal_read", true, false, true, false),
-            ("terminal_close", false, true, true, false),
-            ("ssh_execute", false, true, false, true),
-            ("api_request", false, true, false, true),
+            ("terminal_stop", false, true, true, false),
+            ("ssh_run", false, true, false, true),
+            ("http_send", false, true, false, true),
         ];
         for (name, read_only, destructive, idempotent, open_world) in expected {
             let tool = router.get(name).unwrap();
@@ -1070,6 +944,47 @@ mod tests {
             assert_eq!(annotations.idempotent_hint, Some(idempotent), "{name}");
             assert_eq!(annotations.open_world_hint, Some(open_world), "{name}");
         }
+        for removed in [
+            "vault_items_list",
+            "secret_fill",
+            "terminal_open",
+            "terminal_input",
+            "terminal_close",
+            "ssh_execute",
+            "api_request",
+        ] {
+            assert!(
+                router.get(removed).is_none(),
+                "removed tool {removed} is still registered"
+            );
+        }
+    }
+
+    #[test]
+    fn renamed_arguments_are_rejected() {
+        assert!(
+            serde_json::from_value::<CredentialFillInput>(json!({
+                "itemId": Uuid::new_v4().to_string(),
+                "field": "password",
+                "target": "browser"
+            }))
+            .is_err()
+        );
+        assert!(
+            serde_json::from_value::<SshRunInput>(json!({
+                "connectionId": Uuid::new_v4().to_string(),
+                "command": "hostname"
+            }))
+            .is_err()
+        );
+        assert!(
+            serde_json::from_value::<HttpSendInput>(json!({
+                "itemId": Uuid::new_v4().to_string(),
+                "url": "https://api.example.test/v1/health",
+                "path": "health"
+            }))
+            .is_err()
+        );
     }
 
     #[tokio::test]

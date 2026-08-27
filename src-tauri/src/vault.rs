@@ -3,10 +3,10 @@ use crate::{
     crypto::{MasterKey, create_owner_pin_verifier, verify_owner_pin},
     model::{
         Activity, ApiAuthHeader, AppState, ConnectionInput, ImportSummary, ItemModule, McpState,
-        NewActivity, OwnerEditorDraft, OwnerSecretField, OwnerSecretView, PublicConnection,
-        SecretBundle, SecretField, SecretProfile, SecurityState, Settings, SettingsPatch,
-        StoredConnection, StoredEditorDraft, VaultDocument, module_kind_has_plaintext_reveal,
-        normalize_item_capabilities,
+        NewActivity, OwnerEditorDraft, OwnerSecretField, OwnerSecretView, PortableConnection,
+        PublicConnection, SecretBundle, SecretField, SecretProfile, SecurityState, Settings,
+        SettingsPatch, StoredConnection, StoredEditorDraft, VaultDocument,
+        module_kind_has_plaintext_reveal,
     },
 };
 use anyhow::{Context, Result, bail};
@@ -76,7 +76,7 @@ impl Vault {
                 };
                 vault.with_exclusive_lock(|_| vault.write_document_unlocked(&document))?;
             } else {
-                vault.migrate_to_v7()?;
+                vault.require_v7()?;
             }
             Ok(vault)
         })();
@@ -92,90 +92,17 @@ impl Vault {
         self.inner.key.source()
     }
 
-    fn migrate_to_v7(&self) -> Result<()> {
-        self.with_exclusive_lock(|_| {
-            let bytes = fs::read(&self.inner.vault_path).context("无法读取保险库")?;
-            let has_legacy_ssh_policy = bytes
-                .windows(b"\"securityMode\"".len())
-                .any(|window| window == b"\"securityMode\"")
-                || bytes
-                    .windows(b"\"allowedCommands\"".len())
-                    .any(|window| window == b"\"allowedCommands\"");
-            let mut document: VaultDocument =
-                serde_json::from_slice(&bytes).context("保险库文件格式无效")?;
-            if document.version == 7 {
-                let repaired_names = repair_duplicate_item_names(&mut document.connections);
-                if has_legacy_ssh_policy || repaired_names {
-                    self.write_document_unlocked(&document)?;
-                }
-                return Ok(());
-            }
-            let reset_legacy_fingerprints = match document.version {
-                6 | 5 => false,
-                4 => true,
-                3 => true,
-                2 => {
-                    for connection in &mut document.connections {
-                        migrate_connection_to_v3(connection, &self.inner.key)?;
-                    }
-                    true
-                }
-                version => bail!("不支持的保险库版本 {version}"),
-            };
-            for connection in &mut document.connections {
-                let mut secrets: SecretBundle =
-                    self.inner.key.decrypt(&connection.encrypted_secrets)?;
-                let legacy_capabilities =
-                    normalize_item_capabilities(&connection.capabilities, &connection.kind);
-                if connection.ssh_auth_type.is_empty()
-                    && legacy_capabilities.iter().any(|value| value == "ssh")
-                {
-                    connection.ssh_auth_type = connection.auth_type.clone();
-                }
-                if connection.http_auth_type.is_empty()
-                    && legacy_capabilities.iter().any(|value| value == "http")
-                {
-                    connection.http_auth_type = connection.auth_type.clone();
-                }
-                if connection.modules.is_empty() {
-                    connection.modules = modules_from_legacy(connection, &mut secrets);
-                }
-                connection.modules = normalize_modules(connection.modules.clone())?;
-                let capabilities = derive_capabilities(
-                    &connection.modules,
-                    &secrets,
-                    &connection.http_auth_type,
-                    &connection.api_auth_headers,
-                );
-                let auth_kind = if capabilities.iter().any(|value| value == "ssh") {
-                    "ssh"
-                } else if capabilities.iter().any(|value| value == "http") {
-                    "api"
-                } else {
-                    "secret"
-                };
-                normalize_active_auth_secrets(
-                    auth_kind,
-                    &connection.auth_type,
-                    &connection.api_auth_headers,
-                    &mut secrets,
-                    &mut connection.private_key_name,
-                );
-                connection.encrypted_secrets = self.inner.key.encrypt(&secrets)?;
-                connection.capabilities = capabilities;
-                connection.kind.clear();
-                if reset_legacy_fingerprints {
-                    // Versions before v5 did not record which endpoint owned a fingerprint.
-                    // It is unsafe to carry that trust forward, so force one fresh TOFU pin.
-                    connection.host_fingerprint.clear();
-                    connection.host_fingerprint_host.clear();
-                    connection.host_fingerprint_port = 0;
-                }
-            }
-            repair_duplicate_item_names(&mut document.connections);
-            document.version = 7;
-            self.write_document_unlocked(&document)
-        })
+    fn require_v7(&self) -> Result<()> {
+        let bytes = fs::read(&self.inner.vault_path).context("无法读取保险库")?;
+        let document: VaultDocument =
+            serde_json::from_slice(&bytes).context("保险库文件格式无效")?;
+        if document.version != 7 {
+            bail!(
+                "KRU 0.13 仅支持模块化 v7 保险库；当前文件版本为 {}",
+                document.version
+            );
+        }
+        Ok(())
     }
 
     pub fn owner_pin_configured(&self) -> Result<bool> {
@@ -529,30 +456,15 @@ impl Vault {
                         input.remove_secret_names.push(removed.to_owned());
                     }
                 }
-                input.host = module_value(&input.modules, "host")
-                    .unwrap_or_default()
-                    .to_owned();
-                input.port = module_value(&input.modules, "port")
-                    .and_then(|value| value.parse::<u16>().ok())
-                    .unwrap_or(0);
-                input.base_url = module_value(&input.modules, "url")
-                    .unwrap_or_default()
-                    .to_owned();
                 if input
                     .modules
                     .iter()
                     .any(|module| module.kind == "apiCredential")
                 {
-                    input.auth_type = "auto".to_owned();
                     input.http_auth_type = "auto".to_owned();
                 }
             }
             merge_secret_bundle(&mut secrets, &input.secrets);
-            if !input.username.trim().is_empty() {
-                secrets
-                    .named_secrets
-                    .insert("username".to_owned(), clean_text(&input.username, 160));
-            }
             for name in &input.remove_secret_names {
                 secrets.named_secrets.remove(name.trim());
                 match name.trim() {
@@ -570,31 +482,6 @@ impl Vault {
                         secrets.api_key = None;
                     }
                     _ => {}
-                }
-            }
-
-            // v7 callers send modules directly.  Keep accepting the old GUI/input shape
-            // while existing installations and backups cross the migration boundary.
-            if input.modules.is_empty()
-                && (!input.capabilities.is_empty() || !input.kind.trim().is_empty())
-            {
-                input.modules = normalize_modules(modules_from_legacy_input(&input, &secrets))?;
-                input.host = module_value(&input.modules, "host")
-                    .unwrap_or_default()
-                    .to_owned();
-                input.port = module_value(&input.modules, "port")
-                    .and_then(|value| value.parse::<u16>().ok())
-                    .unwrap_or(0);
-                input.base_url = module_value(&input.modules, "url")
-                    .unwrap_or_default()
-                    .to_owned();
-                if input
-                    .modules
-                    .iter()
-                    .any(|module| module.kind == "apiCredential")
-                {
-                    input.auth_type = "auto".to_owned();
-                    input.http_auth_type = "auto".to_owned();
                 }
             }
 
@@ -752,7 +639,7 @@ impl Vault {
         })
     }
 
-    pub fn export_connections(&self) -> Result<Vec<(PublicConnection, SecretBundle)>> {
+    pub fn export_connections(&self) -> Result<Vec<(PortableConnection, SecretBundle)>> {
         let document = self.read_document()?;
         document
             .connections
@@ -762,14 +649,37 @@ impl Vault {
                     .inner
                     .key
                     .decrypt::<SecretBundle>(&connection.encrypted_secrets)?;
-                Ok((connection.public(Some(&secrets)), secrets))
+                Ok((
+                    PortableConnection {
+                        id: connection.id,
+                        modules: connection.modules,
+                        name: connection.name,
+                        enabled: connection.enabled,
+                        created_at: connection.created_at,
+                        updated_at: connection.updated_at,
+                        description: connection.description,
+                        http_auth_type: connection.http_auth_type,
+                        private_key_name: connection.private_key_name,
+                        host_fingerprint: connection.host_fingerprint,
+                        host_fingerprint_host: connection.host_fingerprint_host,
+                        host_fingerprint_port: connection.host_fingerprint_port,
+                        auth_header: connection.auth_header,
+                        auth_location: connection.auth_location,
+                        auth_prefix: connection.auth_prefix,
+                        api_auth_headers: connection.api_auth_headers,
+                        allowed_methods: connection.allowed_methods,
+                        allowed_path_prefixes: connection.allowed_path_prefixes,
+                        test_path: connection.test_path,
+                    },
+                    secrets,
+                ))
             })
             .collect()
     }
 
     pub fn merge_connections(
         &self,
-        imported: Vec<(PublicConnection, SecretBundle)>,
+        imported: Vec<(PortableConnection, SecretBundle)>,
     ) -> Result<ImportSummary> {
         self.update_document_with_result(|document| {
             let mut summary = ImportSummary {
@@ -911,60 +821,6 @@ impl Vault {
             .open(&self.inner.lock_path)
             .context("无法打开保险库锁文件")
     }
-}
-
-fn migrate_connection_to_v3(connection: &mut StoredConnection, key: &MasterKey) -> Result<()> {
-    let mut secrets: SecretBundle = key.decrypt(&connection.encrypted_secrets)?;
-    let username = match connection.kind.as_str() {
-        "browser" => connection
-            .browser
-            .as_ref()
-            .map(|profile| profile.username.as_str())
-            .unwrap_or(&connection.username),
-        "credential" => connection
-            .credential
-            .as_ref()
-            .map(|profile| profile.username.as_str())
-            .unwrap_or(&connection.username),
-        _ => &connection.username,
-    }
-    .trim();
-    if !username.is_empty() && secrets.named_secrets.get("username").is_none() {
-        secrets
-            .named_secrets
-            .insert("username".to_owned(), username.to_owned());
-    }
-    if let Some(seed) = secrets.named_secrets.get("totpSeed").cloned() {
-        if secrets.named_secrets.get("totp").is_none() {
-            secrets.named_secrets.insert("totp".to_owned(), seed);
-        }
-        secrets.named_secrets.remove("totpSeed");
-    }
-
-    if matches!(connection.kind.as_str(), "browser" | "credential" | "cli") {
-        connection.kind = "secret".to_owned();
-        connection.host.clear();
-        connection.port = 0;
-        connection.auth_type.clear();
-        connection.private_key_name.clear();
-        connection.host_fingerprint.clear();
-        connection.host_fingerprint_host.clear();
-        connection.host_fingerprint_port = 0;
-        connection.base_url.clear();
-        connection.auth_header.clear();
-        connection.allowed_methods.clear();
-        connection.allowed_path_prefixes.clear();
-        connection.test_path.clear();
-    }
-    connection.username.clear();
-    connection.cli = None;
-    connection.browser = None;
-    connection.credential = None;
-    connection.secret = Some(SecretProfile {
-        fields: secrets.available_fields(connection.secret.as_ref()),
-    });
-    connection.encrypted_secrets = key.encrypt(&secrets)?;
-    Ok(())
 }
 
 fn canonical_secret_module_name(kind: &str) -> Option<&'static str> {
@@ -1137,60 +993,6 @@ fn push_module(modules: &mut Vec<ItemModule>, kind: &str, name: &str, value: &st
     });
 }
 
-fn modules_from_legacy(
-    connection: &StoredConnection,
-    secrets: &mut SecretBundle,
-) -> Vec<ItemModule> {
-    let capabilities = normalize_item_capabilities(&connection.capabilities, &connection.kind);
-    let has_ssh = capabilities.iter().any(|value| value == "ssh");
-    let has_http = capabilities.iter().any(|value| value == "http");
-    let mut modules = Vec::new();
-    if !connection.host.is_empty() {
-        push_module(&mut modules, "host", "", &connection.host);
-    }
-    if has_ssh && connection.port > 0 {
-        push_module(&mut modules, "port", "", &connection.port.to_string());
-    }
-    if !connection.base_url.is_empty() {
-        push_module(&mut modules, "url", "", &connection.base_url);
-    }
-    if has_http && !matches!(connection.auth_type.as_str(), "basic" | "custom" | "none") {
-        let credential = secrets
-            .token
-            .as_ref()
-            .or(secrets.api_key.as_ref())
-            .filter(|value| !value.is_empty())
-            .cloned();
-        if let Some(credential) = credential {
-            if secrets.named_secrets.get("apiCredential").is_none() {
-                secrets
-                    .named_secrets
-                    .insert("apiCredential".to_owned(), credential);
-            }
-            push_module(&mut modules, "apiCredential", "apiCredential", "");
-        }
-    }
-    for field in secrets.available_fields(connection.secret.as_ref()) {
-        let kind = match field.name.as_str() {
-            "username" => "username",
-            "password" => "password",
-            "passphrase" => "passphrase",
-            "privateKey" | "private_key" => "privateKey",
-            "totp" => "totp",
-            "token" | "apiKey" | "api_key" if has_http => "apiCredential",
-            "apiCredential" => "apiCredential",
-            _ => "customSecret",
-        };
-        let name = if kind == "customSecret" {
-            &field.name
-        } else {
-            kind
-        };
-        push_module(&mut modules, kind, name, "");
-    }
-    modules
-}
-
 fn fallback_item_name(
     requested: &str,
     id: Uuid,
@@ -1224,95 +1026,14 @@ fn fallback_item_name(
     }
 }
 
-fn modules_from_legacy_input(input: &ConnectionInput, secrets: &SecretBundle) -> Vec<ItemModule> {
-    let capabilities = normalize_item_capabilities(&input.capabilities, &input.kind);
-    let mut modules = Vec::new();
-    if !input.host.trim().is_empty() {
-        push_module(&mut modules, "host", "", input.host.trim());
-    }
-    if capabilities.iter().any(|value| value == "ssh") && input.port > 0 {
-        push_module(&mut modules, "port", "", &input.port.to_string());
-    }
-    if !input.base_url.trim().is_empty() {
-        push_module(&mut modules, "url", "", input.base_url.trim());
-    }
-    if let Some(profile) = &input.secret {
-        for field in &profile.fields {
-            let kind = match field.name.as_str() {
-                "username" => "username",
-                "password" => "password",
-                "passphrase" => "passphrase",
-                "privateKey" | "private_key" => "privateKey",
-                "totp" => "totp",
-                "token" | "apiKey" | "api_key"
-                    if capabilities.iter().any(|value| value == "http") =>
-                {
-                    "apiCredential"
-                }
-                "apiCredential" => "apiCredential",
-                _ => "customSecret",
-            };
-            push_module(
-                &mut modules,
-                kind,
-                if kind == "customSecret" {
-                    &field.name
-                } else {
-                    kind
-                },
-                "",
-            );
-        }
-    }
-    if !modules.iter().any(|module| module.kind == "username") && secrets.get("username").is_some()
-    {
-        push_module(&mut modules, "username", "username", "");
-    }
-    if !modules.iter().any(|module| module.kind == "password") && secrets.get("password").is_some()
-    {
-        push_module(&mut modules, "password", "password", "");
-    }
-    if !modules.iter().any(|module| module.kind == "privateKey")
-        && (secrets.get("privateKey").is_some()
-            || !input.private_key_import_path.trim().is_empty()
-            || input.ssh_auth_type == "privateKey"
-            || input.auth_type == "privateKey")
-    {
-        push_module(&mut modules, "privateKey", "privateKey", "");
-    }
-    if !modules.iter().any(|module| module.kind == "passphrase")
-        && secrets.get("passphrase").is_some()
-    {
-        push_module(&mut modules, "passphrase", "passphrase", "");
-    }
-    if capabilities.iter().any(|value| value == "http")
-        && !modules.iter().any(|module| module.kind == "apiCredential")
-        && secrets.get("apiCredential").is_some()
-    {
-        push_module(&mut modules, "apiCredential", "apiCredential", "");
-    }
-    modules
-}
-
 fn normalize_connection_v7(
-    mut input: ConnectionInput,
+    input: ConnectionInput,
     existing: Option<&StoredConnection>,
     secrets: &SecretBundle,
     private_key_name: String,
     now: String,
 ) -> Result<StoredConnection> {
-    if input.modules.is_empty() && (!input.capabilities.is_empty() || !input.kind.is_empty()) {
-        input.modules = modules_from_legacy_input(&input, secrets);
-    }
-    let mut modules = normalize_modules(input.modules)?;
-    if !input.base_url.trim().is_empty() {
-        if let Some(module) = modules.iter_mut().find(|module| module.kind == "url") {
-            module.value = input.base_url.trim().to_owned();
-        } else if modules.iter().any(|module| module.kind == "apiCredential") {
-            push_module(&mut modules, "url", "", input.base_url.trim());
-        }
-    }
-    modules = normalize_modules(modules)?;
+    let modules = normalize_modules(input.modules)?;
 
     let id = existing
         .map(|value| value.id)
@@ -1350,11 +1071,7 @@ fn normalize_connection_v7(
         ""
     }
     .to_owned();
-    let http_auth_type = if input.http_auth_type.is_empty() {
-        input.auth_type.clone()
-    } else {
-        input.http_auth_type.clone()
-    };
+    let http_auth_type = input.http_auth_type.clone();
     let capabilities =
         derive_capabilities(&modules, secrets, &http_auth_type, &input.api_auth_headers);
     let (host_fingerprint, host_fingerprint_host, host_fingerprint_port) = match existing {
@@ -1434,90 +1151,47 @@ fn normalize_connection_v7(
 }
 
 fn stored_from_portable(
-    public: &PublicConnection,
+    portable: &PortableConnection,
     secrets: &SecretBundle,
     key: &MasterKey,
 ) -> Result<StoredConnection> {
-    let mut secrets = secrets.clone();
-    let mut private_key_name = public.private_key_name.clone();
-    normalize_active_auth_secrets(
-        if public.capabilities.iter().any(|value| value == "ssh") {
-            "ssh"
-        } else if public.capabilities.iter().any(|value| value == "http") {
-            "api"
-        } else {
-            &public.kind
-        },
-        &public.auth_type,
-        &public.api_auth_headers,
-        &mut secrets,
-        &mut private_key_name,
-    );
-    let mut stored = StoredConnection {
-        id: public.id,
-        kind: public.kind.clone(),
-        capabilities: normalize_item_capabilities(&public.capabilities, &public.kind),
-        modules: public
-            .modules
-            .iter()
-            .map(|module| ItemModule {
-                kind: module.kind.clone(),
-                name: module.name.clone(),
-                value: if module.secret {
-                    String::new()
-                } else {
-                    module.value.clone()
-                },
-                agent_visible: Some(module.agent_visible()),
-            })
-            .collect(),
-        name: public.name.clone(),
-        enabled: public.enabled,
-        created_at: public.created_at.clone(),
-        updated_at: public.updated_at.clone(),
-        description: public.description.clone(),
-        host: public.host.clone(),
-        port: public.port,
-        username: public.username.clone(),
-        auth_type: public.auth_type.clone(),
-        ssh_auth_type: public.ssh_auth_type.clone(),
-        http_auth_type: public.http_auth_type.clone(),
-        private_key_name,
-        // Backup payloads predating v5 cannot prove which endpoint owned this
-        // fingerprint. Import it as untrusted and pin again on first use.
-        host_fingerprint: String::new(),
-        host_fingerprint_host: String::new(),
-        host_fingerprint_port: 0,
-        base_url: public.base_url.clone(),
-        auth_header: public.auth_header.clone(),
-        auth_location: public.auth_location.clone(),
-        auth_prefix: public.auth_prefix.clone(),
-        api_auth_headers: public.api_auth_headers.clone(),
-        allowed_methods: public.allowed_methods.clone(),
-        allowed_path_prefixes: public.allowed_path_prefixes.clone(),
-        test_path: public.test_path.clone(),
-        cli: public.cli.clone(),
-        browser: public.browser.clone(),
-        credential: public.credential.clone(),
-        secret: public.secret.clone(),
-        encrypted_secrets: key.encrypt(&secrets)?,
+    let input = ConnectionInput {
+        id: Some(portable.id),
+        modules: portable.modules.clone(),
+        name: portable.name.clone(),
+        enabled: portable.enabled,
+        description: portable.description.clone(),
+        http_auth_type: portable.http_auth_type.clone(),
+        private_key_import_path: String::new(),
+        auth_header: portable.auth_header.clone(),
+        auth_location: portable.auth_location.clone(),
+        auth_prefix: portable.auth_prefix.clone(),
+        api_auth_headers: portable.api_auth_headers.clone(),
+        allowed_methods: portable.allowed_methods.clone(),
+        allowed_path_prefixes: portable.allowed_path_prefixes.clone(),
+        test_path: portable.test_path.clone(),
+        remove_secret_names: Vec::new(),
+        secrets: secrets.clone(),
     };
-    migrate_connection_to_v3(&mut stored, key)?;
-    if stored.modules.is_empty() {
-        stored.modules = modules_from_legacy(&stored, &mut secrets);
+    let mut stored = normalize_connection_v7(
+        input,
+        None,
+        secrets,
+        portable.private_key_name.clone(),
+        portable.updated_at.clone(),
+    )?;
+    stored.created_at = portable.created_at.clone();
+    if !portable.host_fingerprint.is_empty()
+        && portable
+            .host_fingerprint_host
+            .eq_ignore_ascii_case(&stored.host)
+        && portable.host_fingerprint_port == stored.port
+    {
+        stored.host_fingerprint = portable.host_fingerprint.clone();
+        stored.host_fingerprint_host = portable.host_fingerprint_host.clone();
+        stored.host_fingerprint_port = portable.host_fingerprint_port;
     }
-    stored.modules = normalize_modules(stored.modules)?;
-    stored.capabilities = derive_capabilities(
-        &stored.modules,
-        &secrets,
-        &stored.http_auth_type,
-        &stored.api_auth_headers,
-    );
-    stored.secret = Some(SecretProfile {
-        fields: module_fields(&stored.modules),
-    });
     stored.encrypted_secrets = key.encrypt(&secrets)?;
-    stored.kind.clear();
     Ok(stored)
 }
 
@@ -1565,28 +1239,6 @@ fn unique_import_name(connections: &[StoredConnection], requested: &str) -> Stri
             .iter()
             .any(|item| same_item_name(&item.name, candidate))
     })
-}
-
-fn repair_duplicate_item_names(connections: &mut [StoredConnection]) -> bool {
-    let mut changed = false;
-    let mut used = Vec::<String>::with_capacity(connections.len());
-    for connection in connections {
-        let cleaned = clean_text(&connection.name, 80);
-        let requested = if cleaned.is_empty() {
-            format!("ITEM-{}", &connection.id.simple().to_string()[..6]).to_ascii_uppercase()
-        } else {
-            cleaned
-        };
-        let unique = unique_item_name(&requested, |candidate| {
-            used.iter().any(|name| same_item_name(name, candidate))
-        });
-        if connection.name != unique {
-            connection.name = unique.clone();
-            changed = true;
-        }
-        used.push(unique);
-    }
-    changed
 }
 
 fn unique_item_name<F>(requested: &str, exists: F) -> String
@@ -1645,7 +1297,7 @@ fn prepare_auto_api(input: &mut ConnectionInput, secrets: &mut SecretBundle) -> 
         .modules
         .iter()
         .any(|module| module.kind == "apiCredential")
-        || (input.auth_type != "auto" && input.http_auth_type != "auto")
+        || input.http_auth_type != "auto"
     {
         return Ok(());
     }
@@ -1658,9 +1310,16 @@ fn prepare_auto_api(input: &mut ConnectionInput, secrets: &mut SecretBundle) -> 
         // only after a value is configured and capabilities are derived again.
         return Ok(());
     };
-    let profile = api_catalog::infer(&input.name, &input.base_url, &secret);
-    input.base_url = api_catalog::normalize_base_url(&input.base_url, profile.default_base_url)?;
-    input.auth_type = profile.auth_type.to_owned();
+    let current_url = module_value(&input.modules, "url").unwrap_or_default();
+    let profile = api_catalog::infer(&input.name, current_url, &secret);
+    let normalized_url = api_catalog::normalize_base_url(current_url, profile.default_base_url)?;
+    if !normalized_url.is_empty() {
+        if let Some(module) = input.modules.iter_mut().find(|module| module.kind == "url") {
+            module.value = normalized_url;
+        } else {
+            push_module(&mut input.modules, "url", "", &normalized_url);
+        }
+    }
     input.http_auth_type = profile.auth_type.to_owned();
     input.auth_header = profile.auth_header.to_owned();
     input.auth_location = profile.auth_location.to_owned();
@@ -1673,21 +1332,6 @@ fn prepare_auto_api(input: &mut ConnectionInput, secrets: &mut SecretBundle) -> 
     input.allowed_path_prefixes.clear();
     input.test_path.clear();
     Ok(())
-}
-
-fn normalize_active_auth_secrets(
-    kind: &str,
-    auth_type: &str,
-    _api_auth_headers: &[ApiAuthHeader],
-    secrets: &mut SecretBundle,
-    private_key_name: &mut String,
-) {
-    // Authentication is an optional capability layered on top of the item's
-    // encrypted fields. Changing or removing a capability must never erase a
-    // password, token, private key, or unrelated custom field.
-    if kind == "ssh" && auth_type == "privateKey" && private_key_name.is_empty() {
-        *private_key_name = secrets.private_key_name.clone().unwrap_or_default();
-    }
 }
 
 fn valid_identifier(value: &str) -> bool {
@@ -1787,24 +1431,27 @@ mod tests {
 
     fn api_input(id: Option<Uuid>, name: &str, token: &str) -> ConnectionInput {
         let mut secrets = SecretBundle::default();
-        secrets.token = Some(token.to_owned());
+        secrets
+            .named_secrets
+            .insert("apiCredential".into(), token.to_owned());
         ConnectionInput {
             id,
-            kind: "api".to_owned(),
-            capabilities: vec!["fill".to_owned(), "http".to_owned()],
-            modules: vec![],
+            modules: vec![
+                ItemModule {
+                    kind: "url".into(),
+                    value: "https://api.example.test/v1/".into(),
+                    ..Default::default()
+                },
+                ItemModule {
+                    kind: "apiCredential".into(),
+                    ..Default::default()
+                },
+            ],
             name: name.to_owned(),
             enabled: true,
             description: "test connection".to_owned(),
-            host: String::new(),
-            port: 0,
-            username: String::new(),
-            auth_type: "bearer".to_owned(),
-            ssh_auth_type: String::new(),
             http_auth_type: "bearer".to_owned(),
             private_key_import_path: String::new(),
-            host_fingerprint: String::new(),
-            base_url: "https://api.example.test/v1/".to_owned(),
             auth_header: "X-API-Key".to_owned(),
             auth_location: "header".to_owned(),
             auth_prefix: String::new(),
@@ -1812,10 +1459,6 @@ mod tests {
             allowed_methods: vec!["GET".to_owned()],
             allowed_path_prefixes: vec!["/v1/".to_owned()],
             test_path: "/health".to_owned(),
-            cli: None,
-            browser: None,
-            credential: None,
-            secret: None,
             remove_secret_names: vec![],
             secrets,
         }
@@ -1824,23 +1467,36 @@ mod tests {
     fn ssh_input(id: Option<Uuid>) -> ConnectionInput {
         let mut secrets = SecretBundle::default();
         secrets.password = Some("test-password".to_owned());
+        secrets
+            .named_secrets
+            .insert("username".into(), "root".into());
         ConnectionInput {
             id,
-            kind: "ssh".to_owned(),
-            capabilities: vec!["fill".to_owned(), "ssh".to_owned()],
-            modules: vec![],
+            modules: vec![
+                ItemModule {
+                    kind: "host".into(),
+                    value: "127.0.0.1".into(),
+                    ..Default::default()
+                },
+                ItemModule {
+                    kind: "port".into(),
+                    value: "22".into(),
+                    ..Default::default()
+                },
+                ItemModule {
+                    kind: "username".into(),
+                    ..Default::default()
+                },
+                ItemModule {
+                    kind: "password".into(),
+                    ..Default::default()
+                },
+            ],
             name: "ssh-test".to_owned(),
             enabled: true,
             description: String::new(),
-            host: "127.0.0.1".to_owned(),
-            port: 22,
-            username: "root".to_owned(),
-            auth_type: "password".to_owned(),
-            ssh_auth_type: "password".to_owned(),
             http_auth_type: String::new(),
             private_key_import_path: String::new(),
-            host_fingerprint: String::new(),
-            base_url: String::new(),
             auth_header: String::new(),
             auth_location: String::new(),
             auth_prefix: String::new(),
@@ -1848,10 +1504,6 @@ mod tests {
             allowed_methods: vec![],
             allowed_path_prefixes: vec![],
             test_path: String::new(),
-            cli: None,
-            browser: None,
-            credential: None,
-            secret: None,
             remove_secret_names: vec![],
             secrets,
         }
@@ -1934,16 +1586,21 @@ mod tests {
         let directory = tempdir().unwrap();
         let vault = Vault::open(directory.path().join("vault")).unwrap();
         let mut input = api_input(None, "Addressless API", "opaque-api-secret");
-        input.auth_type = "auto".to_owned();
-        input.base_url.clear();
+        input.http_auth_type = "auto".to_owned();
+        input.modules.retain(|module| module.kind != "url");
         let addressless = vault.save_connection(input).unwrap();
         assert_eq!(addressless.name, "Addressless API");
         assert!(addressless.base_url.is_empty());
         assert_eq!(addressless.auth_type, "bearer");
 
         let mut input = api_input(None, "Example", "another-api-secret");
-        input.auth_type = "auto".to_owned();
-        input.base_url = "api.example.test/v1".to_owned();
+        input.http_auth_type = "auto".to_owned();
+        input
+            .modules
+            .iter_mut()
+            .find(|module| module.kind == "url")
+            .unwrap()
+            .value = "api.example.test/v1".to_owned();
         let normalized = vault.save_connection(input).unwrap();
         assert_eq!(normalized.base_url, "https://api.example.test/v1");
     }
@@ -1953,8 +1610,6 @@ mod tests {
         let directory = tempdir().unwrap();
         let vault = Vault::open(directory.path().join("vault")).unwrap();
         let mut mixed = ssh_input(None);
-        mixed.kind.clear();
-        mixed.capabilities.clear();
         mixed.http_auth_type = "auto".to_owned();
         mixed.modules = vec![
             ItemModule {
@@ -2002,10 +1657,7 @@ mod tests {
         );
 
         let mut draft = ssh_input(None);
-        draft.kind.clear();
-        draft.capabilities.clear();
         draft.name = "Draft host".to_owned();
-        draft.username.clear();
         draft.secrets = SecretBundle::default();
         draft.modules = vec![
             ItemModule {
@@ -2038,8 +1690,6 @@ mod tests {
         let vault = Vault::open(directory.path().join("vault")).unwrap();
 
         let mut missing_name = ssh_input(None);
-        missing_name.kind.clear();
-        missing_name.capabilities.clear();
         missing_name.name.clear();
         missing_name.modules = vec![ItemModule {
             kind: "password".into(),
@@ -2056,8 +1706,6 @@ mod tests {
         );
 
         let mut missing_modules = ssh_input(None);
-        missing_modules.kind.clear();
-        missing_modules.capabilities.clear();
         missing_modules.modules.clear();
         assert!(
             vault
@@ -2088,52 +1736,17 @@ mod tests {
     }
 
     #[test]
-    fn opening_existing_v7_repairs_duplicate_item_names() {
+    fn unsupported_vault_versions_are_rejected() {
         let directory = tempdir().unwrap();
         let vault_dir = directory.path().join("vault");
         let vault = Vault::open(vault_dir.clone()).unwrap();
-        vault
-            .save_connection(api_input(None, "Production API", "first-token"))
-            .unwrap();
-
         let mut document = vault.read_document().unwrap();
-        let mut duplicate = document.connections[0].clone();
-        duplicate.id = Uuid::new_v4();
-        duplicate.name = " production api ".to_owned();
-        document.connections.push(duplicate);
+        document.version = 6;
         vault.write_document_unlocked(&document).unwrap();
         drop(vault);
 
-        let reopened = Vault::open(vault_dir).unwrap();
-        let names = reopened
-            .list_connections()
-            .unwrap()
-            .into_iter()
-            .map(|item| item.name)
-            .collect::<Vec<_>>();
-        assert_eq!(names, ["Production API", "production api(2)"]);
-    }
-
-    #[test]
-    fn opening_existing_v7_removes_legacy_ssh_command_settings() {
-        let directory = tempdir().unwrap();
-        let vault_dir = directory.path().join("vault");
-        let vault = Vault::open(vault_dir.clone()).unwrap();
-        vault.save_connection(ssh_input(None)).unwrap();
-        let vault_path = vault_dir.join("vault.json");
-        let mut raw: serde_json::Value =
-            serde_json::from_slice(&fs::read(&vault_path).unwrap()).unwrap();
-        let connection = raw["connections"][0].as_object_mut().unwrap();
-        connection.insert("securityMode".into(), serde_json::json!("readonly"));
-        connection.insert("allowedCommands".into(), serde_json::json!(["hostname"]));
-        fs::write(&vault_path, serde_json::to_vec_pretty(&raw).unwrap()).unwrap();
-        drop(vault);
-
-        let reopened = Vault::open(vault_dir).unwrap();
-        assert_eq!(reopened.list_connections().unwrap().len(), 1);
-        let rewritten = fs::read_to_string(vault_path).unwrap();
-        assert!(!rewritten.contains("securityMode"));
-        assert!(!rewritten.contains("allowedCommands"));
+        let error = Vault::open(vault_dir).err().expect("version 6 must fail");
+        assert!(format!("{error:#}").contains("仅支持模块化 v7"));
     }
 
     #[test]
@@ -2143,9 +1756,6 @@ mod tests {
         let saved = vault.save_connection(ssh_input(None)).unwrap();
         let existing = vault.get_connection(saved.id).unwrap();
         let mut update = ssh_input(Some(saved.id));
-        update.kind.clear();
-        update.capabilities.clear();
-        update.username.clear();
         update.secrets = SecretBundle::default();
         update.modules = existing
             .stored
@@ -2157,40 +1767,6 @@ mod tests {
         let after = vault.get_connection(saved.id).unwrap();
         assert!(after.secrets.get("password").is_none());
         assert!(!after.stored.capabilities.iter().any(|value| value == "ssh"));
-    }
-
-    #[test]
-    fn v6_items_migrate_to_v7_modules_without_losing_ssh_trust() {
-        let directory = tempdir().unwrap();
-        let vault_dir = directory.path().join("vault");
-        let vault = Vault::open(vault_dir.clone()).unwrap();
-        let saved = vault.save_connection(ssh_input(None)).unwrap();
-        vault
-            .verify_or_pin_ssh_fingerprint(saved.id, "v6-trust", true)
-            .unwrap();
-        vault
-            .update_document(|document| {
-                document.version = 6;
-                let connection = document.connections.first_mut().unwrap();
-                connection.kind = "ssh".to_owned();
-                connection.modules.clear();
-                Ok(())
-            })
-            .unwrap();
-        drop(vault);
-
-        let migrated = Vault::open(vault_dir.clone()).unwrap();
-        let connection = migrated.get_connection(saved.id).unwrap().stored;
-        assert_eq!(connection.capabilities, vec!["fill", "ssh"]);
-        assert!(
-            connection
-                .modules
-                .iter()
-                .any(|module| module.kind == "host")
-        );
-        assert_eq!(connection.host_fingerprint, "SHA256:v6-trust");
-        let raw = fs::read_to_string(vault_dir.join("vault.json")).unwrap();
-        assert!(raw.contains("\"version\": 7"));
     }
 
     #[test]
@@ -2215,7 +1791,7 @@ mod tests {
             owner
                 .fields
                 .iter()
-                .find(|field| field.name == "token")
+                .find(|field| field.name == "apiCredential")
                 .map(|field| field.value.as_str()),
             Some("owner-token-marker-7721")
         );
@@ -2319,7 +1895,7 @@ mod tests {
         for index in 0..6 {
             assert!(connections.iter().any(|connection| {
                 connection.stored.name == format!("first-open-{index}")
-                    && connection.secrets.token.as_deref()
+                    && connection.secrets.get("apiCredential")
                         == Some(format!("first-open-secret-{index}").as_str())
             }));
         }
@@ -2329,9 +1905,7 @@ mod tests {
     fn ssh_fingerprint_tracks_the_same_endpoint_and_clears_after_endpoint_change() {
         let directory = tempdir().unwrap();
         let vault = Vault::open(directory.path().join("vault")).unwrap();
-        let mut new_connection = ssh_input(None);
-        new_connection.host_fingerprint = "SHA256:client-supplied-key".to_owned();
-        let saved = vault.save_connection(new_connection).unwrap();
+        let saved = vault.save_connection(ssh_input(None)).unwrap();
         assert!(
             vault
                 .get_connection(saved.id)
@@ -2355,9 +1929,7 @@ mod tests {
                 .is_err()
         );
 
-        let mut edited = ssh_input(Some(saved.id));
-        edited.host_fingerprint.clear();
-        vault.save_connection(edited).unwrap();
+        vault.save_connection(ssh_input(Some(saved.id))).unwrap();
         assert_eq!(
             vault
                 .get_connection(saved.id)
@@ -2368,8 +1940,12 @@ mod tests {
         );
 
         let mut moved = ssh_input(Some(saved.id));
-        moved.host = "new-host.example.test".to_owned();
-        moved.host_fingerprint = "SHA256:first-key".to_owned();
+        moved
+            .modules
+            .iter_mut()
+            .find(|module| module.kind == "host")
+            .unwrap()
+            .value = "new-host.example.test".to_owned();
         vault.save_connection(moved).unwrap();
         assert!(
             vault
@@ -2393,62 +1969,6 @@ mod tests {
     }
 
     #[test]
-    fn v4_ssh_fingerprint_is_cleared_before_fresh_tofu() {
-        let directory = tempdir().unwrap();
-        let vault_dir = directory.path().join("vault");
-        let vault = Vault::open(vault_dir.clone()).unwrap();
-        let saved = vault.save_connection(ssh_input(None)).unwrap();
-        vault
-            .verify_or_pin_ssh_fingerprint(saved.id, "legacy-key", true)
-            .unwrap();
-        vault
-            .update_document(|document| {
-                document.version = 4;
-                let connection = document.connections.first_mut().unwrap();
-                connection.host_fingerprint_host.clear();
-                connection.host_fingerprint_port = 0;
-                Ok(())
-            })
-            .unwrap();
-        drop(vault);
-
-        let migrated = Vault::open(vault_dir).unwrap();
-        let connection = migrated.get_connection(saved.id).unwrap().stored;
-        assert!(connection.host_fingerprint.is_empty());
-        assert!(connection.host_fingerprint_host.is_empty());
-        assert_eq!(connection.host_fingerprint_port, 0);
-    }
-
-    #[test]
-    fn v5_item_migration_preserves_endpoint_bound_ssh_trust() {
-        let directory = tempdir().unwrap();
-        let vault_dir = directory.path().join("vault");
-        let vault = Vault::open(vault_dir.clone()).unwrap();
-        let saved = vault.save_connection(ssh_input(None)).unwrap();
-        vault
-            .verify_or_pin_ssh_fingerprint(saved.id, "trusted-key", true)
-            .unwrap();
-        vault
-            .update_document(|document| {
-                document.version = 5;
-                let connection = document.connections.first_mut().unwrap();
-                connection.kind = "ssh".to_owned();
-                connection.capabilities.clear();
-                Ok(())
-            })
-            .unwrap();
-        drop(vault);
-
-        let migrated = Vault::open(vault_dir).unwrap();
-        let connection = migrated.get_connection(saved.id).unwrap().stored;
-        assert!(connection.kind.is_empty());
-        assert_eq!(connection.capabilities, vec!["fill", "ssh"]);
-        assert_eq!(connection.host_fingerprint, "SHA256:trusted-key");
-        assert_eq!(connection.host_fingerprint_host, "127.0.0.1");
-        assert_eq!(connection.host_fingerprint_port, 22);
-    }
-
-    #[test]
     fn imported_private_key_survives_source_file_removal() {
         let directory = tempdir().unwrap();
         let vault_dir = directory.path().join("vault");
@@ -2460,21 +1980,31 @@ mod tests {
         let saved = vault
             .save_connection(ConnectionInput {
                 id: None,
-                kind: "ssh".into(),
-                capabilities: vec!["fill".into(), "ssh".into()],
-                modules: vec![],
+                modules: vec![
+                    ItemModule {
+                        kind: "host".into(),
+                        value: "127.0.0.1".into(),
+                        ..Default::default()
+                    },
+                    ItemModule {
+                        kind: "port".into(),
+                        value: "22".into(),
+                        ..Default::default()
+                    },
+                    ItemModule {
+                        kind: "username".into(),
+                        ..Default::default()
+                    },
+                    ItemModule {
+                        kind: "privateKey".into(),
+                        ..Default::default()
+                    },
+                ],
                 name: "key-test".into(),
                 enabled: true,
                 description: String::new(),
-                host: "127.0.0.1".into(),
-                port: 22,
-                username: "root".into(),
-                auth_type: "privateKey".into(),
-                ssh_auth_type: "privateKey".into(),
                 http_auth_type: String::new(),
                 private_key_import_path: key_path.to_string_lossy().into_owned(),
-                host_fingerprint: String::new(),
-                base_url: String::new(),
                 auth_header: String::new(),
                 auth_location: String::new(),
                 auth_prefix: String::new(),
@@ -2482,12 +2012,14 @@ mod tests {
                 allowed_methods: vec![],
                 allowed_path_prefixes: vec![],
                 test_path: String::new(),
-                cli: None,
-                browser: None,
-                credential: None,
-                secret: None,
                 remove_secret_names: vec![],
-                secrets: SecretBundle::default(),
+                secrets: {
+                    let mut secrets = SecretBundle::default();
+                    secrets
+                        .named_secrets
+                        .insert("username".into(), "root".into());
+                    secrets
+                },
             })
             .unwrap();
         fs::remove_file(&key_path).unwrap();
@@ -2497,19 +2029,6 @@ mod tests {
         assert_eq!(decrypted.stored.private_key_name, "id_test");
         let raw = fs::read_to_string(vault_dir.join("vault.json")).unwrap();
         assert!(!raw.contains("private-key-marker-4382"));
-
-        vault.save_connection(ssh_input(Some(saved.id))).unwrap();
-        let password_mode = vault.get_connection(saved.id).unwrap();
-        assert_eq!(password_mode.stored.auth_type, "password");
-        assert_eq!(password_mode.stored.private_key_name, "id_test");
-        assert_eq!(
-            password_mode.secrets.private_key.as_deref(),
-            Some(key_marker)
-        );
-        assert_eq!(
-            password_mode.secrets.password.as_deref(),
-            Some("test-password")
-        );
     }
 
     #[test]
@@ -2526,21 +2045,21 @@ mod tests {
             .insert("username".into(), "developer@example.test".into());
         let input = |id, secrets, remove_secret_names| ConnectionInput {
             id,
-            kind: "secret".into(),
-            capabilities: vec!["fill".into()],
-            modules: vec![],
+            modules: vec![
+                ItemModule {
+                    kind: "username".into(),
+                    ..Default::default()
+                },
+                ItemModule {
+                    kind: "password".into(),
+                    ..Default::default()
+                },
+            ],
             name: "generic-login".into(),
             enabled: true,
             description: String::new(),
-            host: String::new(),
-            port: 0,
-            username: String::new(),
-            auth_type: String::new(),
-            ssh_auth_type: String::new(),
             http_auth_type: String::new(),
             private_key_import_path: String::new(),
-            host_fingerprint: String::new(),
-            base_url: String::new(),
             auth_header: String::new(),
             auth_location: String::new(),
             auth_prefix: String::new(),
@@ -2548,10 +2067,6 @@ mod tests {
             allowed_methods: vec![],
             allowed_path_prefixes: vec![],
             test_path: String::new(),
-            cli: None,
-            browser: None,
-            credential: None,
-            secret: None,
             remove_secret_names,
             secrets,
         };
@@ -2592,83 +2107,5 @@ mod tests {
                 .get("password")
                 .is_none()
         );
-    }
-
-    #[test]
-    fn v2_browser_item_migrates_to_v7_without_plaintext_metadata() {
-        let directory = tempdir().unwrap();
-        let vault_dir = directory.path().join("vault");
-        let vault = Vault::open(vault_dir.clone()).unwrap();
-        let mut secrets = SecretBundle::default();
-        secrets
-            .named_secrets
-            .insert("password".into(), "migration-password-marker".into());
-        secrets
-            .named_secrets
-            .insert("totpSeed".into(), "JBSWY3DPEHPK3PXP".into());
-        let now = Utc::now().to_rfc3339();
-        let legacy = StoredConnection {
-            id: Uuid::new_v4(),
-            kind: "browser".into(),
-            capabilities: Vec::new(),
-            modules: Vec::new(),
-            name: "legacy browser".into(),
-            enabled: true,
-            created_at: now.clone(),
-            updated_at: now,
-            description: String::new(),
-            host: String::new(),
-            port: 0,
-            username: "legacy-user-marker".into(),
-            auth_type: "password".into(),
-            ssh_auth_type: String::new(),
-            http_auth_type: String::new(),
-            private_key_name: String::new(),
-            host_fingerprint: String::new(),
-            host_fingerprint_host: String::new(),
-            host_fingerprint_port: 0,
-            base_url: String::new(),
-            auth_header: String::new(),
-            auth_location: String::new(),
-            auth_prefix: String::new(),
-            api_auth_headers: vec![],
-            allowed_methods: vec![],
-            allowed_path_prefixes: vec![],
-            test_path: String::new(),
-            cli: None,
-            browser: Some(crate::model::BrowserProfile {
-                origin: "https://legacy.example".into(),
-                username: "legacy-user-marker".into(),
-                selectors: Default::default(),
-            }),
-            credential: None,
-            secret: None,
-            encrypted_secrets: vault.inner.key.encrypt(&secrets).unwrap(),
-        };
-        vault
-            .write_document_unlocked(&VaultDocument {
-                version: 2,
-                settings: Settings::default(),
-                browser_bridge_secret: None,
-                owner_pin: None,
-                connections: vec![legacy],
-                editor_drafts: vec![],
-                activities: vec![],
-            })
-            .unwrap();
-        drop(vault);
-
-        let migrated = Vault::open(vault_dir.clone()).unwrap();
-        let item = migrated.export_connections().unwrap().pop().unwrap();
-        assert!(item.0.kind.is_empty());
-        assert_eq!(item.0.capabilities, vec!["fill"]);
-        assert_eq!(item.1.get("username"), Some("legacy-user-marker"));
-        assert_eq!(item.1.get("password"), Some("migration-password-marker"));
-        assert_eq!(item.1.get("totp"), Some("JBSWY3DPEHPK3PXP"));
-        let raw = fs::read_to_string(vault_dir.join("vault.json")).unwrap();
-        assert!(raw.contains("\"version\": 7"));
-        assert!(!raw.contains("legacy-user-marker"));
-        assert!(!raw.contains("migration-password-marker"));
-        assert!(!raw.contains("legacy.example"));
     }
 }

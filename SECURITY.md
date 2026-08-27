@@ -5,14 +5,14 @@ KRU is a local credential execution tool exposed through stdio MCP. Its primary 
 ## Security goals
 
 - Vault secrets are encrypted at rest with authenticated encryption.
-- Modules that are not marked `agentVisible` do not return plaintext through `vault_items_list`.
-- Hidden values can be used locally by `secret_fill`, `ssh_execute`, and `api_request`.
+- Modules that are not marked `agentVisible` do not return plaintext through `items_search`.
+- Hidden values can be used locally by `credential_fill`, `ssh_run`, and `http_send`.
 - Known stored credentials are redacted from activity errors, terminal output, SSH output, and API responses where KRU can identify them.
 - API redirects and caller-supplied authentication, cookie, proxy-authentication, and host headers are blocked.
 
 ## Explicitly agent-visible values
 
-The per-module **Agent visible** switch is a disclosure decision. When it is enabled, `vault_items_list` includes that module's `value`, and the value may enter the Agent's context and its model provider's logs. For a visible TOTP module, KRU returns only the current six-digit code, never the permanent TOTP seed.
+The per-module **Agent visible** switch is a disclosure decision. When it is enabled, `items_search` includes that module's `value`, and the value may enter the Agent's context and its model provider's logs. For a visible TOTP module, KRU returns only the current six-digit code, never the permanent TOTP seed.
 
 Do not enable Agent visibility for a value that must remain outside the Agent context. This switch is separate from whether the module may be used by KRU for fill, SSH, or API actions.
 
@@ -33,7 +33,7 @@ MCP tool annotations are descriptive hints. KRU enforces its actual restrictions
 
 ### Browser and desktop fill
 
-`secret_fill` writes one value and never submits it. The paired browser extension writes only to the currently focused control. Desktop fill depends on the real operating-system foreground focus; background DOM focus is not sufficient. KRU cannot prove that the focused destination is trustworthy.
+`credential_fill` writes one value and never submits it. The paired browser extension writes only to the currently focused control. Desktop fill depends on the real operating-system foreground focus; background DOM focus is not sufficient. KRU cannot prove that the focused destination is trustworthy.
 
 ### Managed terminal
 
@@ -41,7 +41,7 @@ KRU starts the requested program directly and does not insert a shell. Ordinary 
 
 ### SSH
 
-An item advertising `ssh_execute` grants the Agent full command execution through that stored SSH identity. KRU has no observation, diagnostic, restricted, or execution mode. Host fingerprints are bound to their host and port, but users must still review unexpected host-key changes.
+An item advertising `ssh_run` grants the Agent full command execution through that stored SSH identity. KRU has no observation, diagnostic, restricted, or execution mode. Host fingerprints are bound to their host and port, but users must still review unexpected host-key changes.
 
 ### API requests
 
@@ -53,7 +53,7 @@ KRU disables redirects and ignores caller-supplied sensitive authentication head
 
 The vault and master-key files remain in the current user's application-data directory. PIN protects casual GUI viewing; it is not a separate encryption key and does not stop another process running as the same user.
 
-Current `.mvault` backups are self-contained authenticated-encryption packages that KRU unlocks automatically. They prevent accidental plaintext reading and detect modification, but they are not access-controlled. Anyone who obtains a backup can decode it with KRU or another format-aware tool. Protect backup files as if they contained plaintext secrets. Legacy password-protected backups remain importable.
+`.mvault` backups are self-contained authenticated-encryption packages that KRU unlocks automatically. They prevent accidental plaintext reading and detect modification, but they are not access-controlled. Anyone who obtains a backup can decode it with KRU or another format-aware tool. Protect backup files as if they contained plaintext secrets.
 
 ## Reporting a vulnerability
 

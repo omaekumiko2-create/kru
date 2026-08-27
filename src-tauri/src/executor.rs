@@ -32,13 +32,10 @@ const MAX_RESULT_LENGTH: usize = 200_000;
 #[derive(Debug, Clone, Deserialize, JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct ApiRequestInput {
-    #[serde(default)]
-    #[schemars(description = "Optional absolute URL. Required when the item has no saved URL.")]
+    #[schemars(description = "Absolute request URL.")]
     pub url: String,
     #[serde(default = "default_method")]
     pub method: String,
-    #[serde(default)]
-    pub path: String,
     #[serde(default)]
     pub query: HashMap<String, Value>,
     #[serde(default)]
@@ -51,7 +48,7 @@ fn default_method() -> String {
     "GET".to_owned()
 }
 
-pub fn describe_api_request(connection: &StoredConnection, input: &ApiRequestInput) -> String {
+pub fn describe_api_request(input: &ApiRequestInput) -> String {
     let method = input.method.trim().to_ascii_uppercase();
     let method = if method.is_empty()
         || method.len() > 20
@@ -63,7 +60,7 @@ pub fn describe_api_request(connection: &StoredConnection, input: &ApiRequestInp
     } else {
         method
     };
-    let Ok(target) = build_api_url(connection, &input.url, &input.path, &input.query) else {
+    let Ok(target) = build_api_url(&input.url, &input.query) else {
         return format!("API {method}");
     };
     let origin = target.origin().ascii_serialization();
@@ -107,7 +104,7 @@ pub async fn execute_api(
     if !connection.stored.enabled {
         bail!("该连接已禁用");
     }
-    let mut target = build_api_url(&connection.stored, &input.url, &input.path, &input.query)?;
+    let mut target = build_api_url(&input.url, &input.query)?;
     let method = assert_api_request_allowed(&connection.stored, &input.method, &target)?;
     let method = Method::from_bytes(method.as_bytes()).context("HTTP 方法无效")?;
     let blocked = blocked_header_names(&connection.stored);
@@ -359,12 +356,22 @@ pub async fn test_connection(vault: &Vault, connection: &DecryptedConnection) ->
         }
         Ok("SSH 连接成功".to_owned())
     } else {
+        let mut base = Url::parse(&connection.stored.base_url).context("API URL 无效")?;
+        if !base.path().ends_with('/') {
+            base.set_path(&format!("{}/", base.path()));
+        }
+        let url = if connection.stored.test_path.trim().is_empty() {
+            base.to_string()
+        } else {
+            base.join(connection.stored.test_path.trim().trim_start_matches('/'))
+                .context("API 测试路径无效")?
+                .to_string()
+        };
         let result = execute_api(
             connection,
             ApiRequestInput {
-                url: String::new(),
+                url,
                 method: "GET".to_owned(),
-                path: connection.stored.test_path.clone(),
                 query: HashMap::new(),
                 headers: HashMap::new(),
                 body: None,
@@ -375,25 +382,8 @@ pub async fn test_connection(vault: &Vault, connection: &DecryptedConnection) ->
     }
 }
 
-fn build_api_url(
-    connection: &StoredConnection,
-    runtime_url: &str,
-    path: &str,
-    query: &HashMap<String, Value>,
-) -> Result<Url> {
-    let mut target = if !runtime_url.trim().is_empty() {
-        Url::parse(runtime_url.trim()).context("API 运行时 URL 无效")?
-    } else {
-        if connection.base_url.trim().is_empty() {
-            bail!("该 API 项目未保存 URL；请在本次调用中提供绝对 URL");
-        }
-        let mut base = Url::parse(&connection.base_url)?;
-        if !base.path().ends_with('/') {
-            base.set_path(&format!("{}/", base.path()));
-        }
-        let relative = path.trim().trim_start_matches('/');
-        base.join(relative).context("API 请求路径无效")?
-    };
+fn build_api_url(absolute_url: &str, query: &HashMap<String, Value>) -> Result<Url> {
+    let mut target = Url::parse(absolute_url.trim()).context("API 请求 URL 必须是绝对地址")?;
     {
         let mut pairs = target.query_pairs_mut();
         for (name, value) in query {
@@ -734,9 +724,8 @@ mod tests {
         let result = execute_api(
             &connection,
             ApiRequestInput {
-                url: String::new(),
+                url: format!("http://{address}/v1/echo"),
                 method: "GET".into(),
-                path: "echo".into(),
                 query: HashMap::new(),
                 headers,
                 body: None,
@@ -786,9 +775,8 @@ mod tests {
         let result = execute_api(
             &connection,
             ApiRequestInput {
-                url: String::new(),
+                url: format!("http://{address}/v1/echo"),
                 method: "GET".into(),
-                path: "echo".into(),
                 query,
                 headers: HashMap::new(),
                 body: None,
@@ -829,20 +817,15 @@ mod tests {
 
     #[test]
     fn api_activity_description_omits_query_and_records_origin_and_path() {
-        let item = stored(String::new());
         let mut query = HashMap::new();
         query.insert("token".into(), Value::String("must-not-be-logged".into()));
-        let description = describe_api_request(
-            &item,
-            &ApiRequestInput {
-                url: "https://api.example.test/v1/items".into(),
-                method: "post".into(),
-                path: String::new(),
-                query,
-                headers: HashMap::new(),
-                body: None,
-            },
-        );
+        let description = describe_api_request(&ApiRequestInput {
+            url: "https://api.example.test/v1/items".into(),
+            method: "post".into(),
+            query,
+            headers: HashMap::new(),
+            body: None,
+        });
         assert_eq!(description, "API POST https://api.example.test/v1/items");
         assert!(!description.contains("token"));
         assert!(!description.contains("must-not-be-logged"));

@@ -187,10 +187,16 @@ function mcpSmoke() {
       assert.notEqual(listResult.isError, true, "vault_items_list returned an MCP error");
       const textBlock = listResult.content.find((block) => block.type === "text");
       assert.ok(textBlock?.text, "vault_items_list returned no text payload");
+      const textPayload = JSON.parse(textBlock.text);
       assert.deepEqual(
-        JSON.parse(textBlock.text),
-        { items: [] },
+        textPayload,
+        { count: 0, query: null, items: [] },
         "smoke vault was not empty",
+      );
+      assert.deepEqual(
+        listResult.structuredContent,
+        textPayload,
+        "vault_items_list text and structured content differ",
       );
       completed = true;
       child.stdin.end();

@@ -1,6 +1,7 @@
 use crate::policy::redaction_candidates;
 use anyhow::{Context, Result, bail};
 use portable_pty::{Child, CommandBuilder, MasterPty, PtySize, native_pty_system};
+use schemars::JsonSchema;
 use serde::Serialize;
 use std::{
     collections::{HashMap, VecDeque},
@@ -18,14 +19,15 @@ const MAX_SESSIONS: usize = 8;
 const MAX_OUTPUT: usize = 200_000;
 const MAX_INPUT: usize = 64_000;
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct TerminalOpenResult {
+    #[schemars(with = "String")]
     pub session_id: Uuid,
     pub executable: String,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct TerminalReadResult {
     pub output: String,

@@ -152,13 +152,22 @@ Exported `.mvault` packages are encrypted and portable, but they contain their o
 
 ## MCP surface
 
-```text
-vault_items_list
-secret_fill
-ssh_execute
-api_request
-terminal_open · terminal_input · terminal_read · terminal_close
-```
+KRU's server instructions use one consistent workflow: discover credentials with `vault_items_list`, pass the known item name as `query`, and call only an action advertised by that item. Hidden plaintext must never be requested from the user, and KRU has no invented observation, diagnostic, or execution modes.
+
+| Tool | Purpose | MCP impact hint |
+| --- | --- | --- |
+| `vault_items_list(query?)` | Find usable items, modules, targets, and actions | Read-only, idempotent, local |
+| `secret_fill` | Write one saved value into an approved local target | Changes local state |
+| `ssh_execute` | Run the requested command through a stored SSH identity | External effects possible |
+| `api_request` | Send an authenticated, policy-checked HTTP request | External effects possible |
+| `terminal_open` | Start a managed local process | Changes local state |
+| `terminal_input` | Write ordinary input or a selected saved value | External effects possible |
+| `terminal_read` | Read redacted managed-terminal output | Read-only, idempotent, local |
+| `terminal_close` | Close a managed terminal session | Idempotent state change |
+
+With no `query`, `vault_items_list` returns all usable items. With one, an exact case-insensitive name match wins; otherwise KRU returns names containing the query. This keeps unrelated credential metadata out of the Agent context when the item is already known.
+
+Every successful tool call returns both typed `structuredContent` and equivalent JSON text for older MCP clients. Business failures return an MCP tool result with `isError=true`; malformed protocol input remains a protocol error. Tool annotations help clients describe impact, but all real security restrictions are enforced by KRU's backend.
 
 There is no unrestricted `get_secret` tool. `vault_items_list` returns item and module metadata, non-secret target information, and derived actions. A credential value is included only when its Agent visibility switch is on.
 

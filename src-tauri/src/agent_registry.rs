@@ -21,7 +21,7 @@ const ACTION_CLI_TIMEOUT: Duration = Duration::from_secs(20);
 const KRU_INSTRUCTION_START: &str = "<!-- KRU MANAGED INSTRUCTION START -->";
 const KRU_INSTRUCTION_END: &str = "<!-- KRU MANAGED INSTRUCTION END -->";
 const KRU_INSTRUCTION_BLOCK: &str = r#"<!-- KRU MANAGED INSTRUCTION START -->
-When a user asks to log in, connect to SSH, a VPS, or a server, call an authenticated API, or use any credential, check KRU first. Call `vault_items_list` before asking the user for credentials; if a matching item exists, use its advertised KRU action. Never ask KRU to reveal hidden secret plaintext. KRU has no observation, diagnostic, restricted, or execution mode; when `ssh_execute` is advertised, send the command the task actually requires and never ask the user to change a mode.
+When a task may require a login, credential, authenticated API, SSH host, VPS, or server, check KRU before asking the user to provide a secret. Call `vault_items_list`, pass the project name as `query` when known, and then follow KRU's MCP server instructions and the matched project's advertised actions.
 <!-- KRU MANAGED INSTRUCTION END -->"#;
 
 #[derive(Debug, Clone, Serialize)]

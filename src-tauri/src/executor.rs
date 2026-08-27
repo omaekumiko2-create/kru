@@ -51,7 +51,37 @@ fn default_method() -> String {
     "GET".to_owned()
 }
 
-#[derive(Debug, Clone, Serialize)]
+pub fn describe_api_request(connection: &StoredConnection, input: &ApiRequestInput) -> String {
+    let method = input.method.trim().to_ascii_uppercase();
+    let method = if method.is_empty()
+        || method.len() > 20
+        || !method
+            .bytes()
+            .all(|byte| byte.is_ascii_uppercase() || byte == b'-')
+    {
+        "REQUEST".to_owned()
+    } else {
+        method
+    };
+    let Ok(target) = build_api_url(connection, &input.url, &input.path, &input.query) else {
+        return format!("API {method}");
+    };
+    let origin = target.origin().ascii_serialization();
+    let mut path = target.path().to_owned();
+    if path.len() > 160 {
+        let boundary = path
+            .char_indices()
+            .map(|(index, _)| index)
+            .take_while(|index| *index <= 157)
+            .last()
+            .unwrap_or(0);
+        path.truncate(boundary);
+        path.push_str("...");
+    }
+    format!("API {method} {origin}{path}")
+}
+
+#[derive(Debug, Clone, Serialize, JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct ApiResponse {
     pub status: u16,
@@ -61,7 +91,7 @@ pub struct ApiResponse {
     pub body: String,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct SshResponse {
     pub exit_code: Option<u32>,
@@ -795,6 +825,27 @@ mod tests {
             "custom-secret-9384"
         );
         assert!(blocked_header_names(&item).contains("x-client-secret"));
+    }
+
+    #[test]
+    fn api_activity_description_omits_query_and_records_origin_and_path() {
+        let item = stored(String::new());
+        let mut query = HashMap::new();
+        query.insert("token".into(), Value::String("must-not-be-logged".into()));
+        let description = describe_api_request(
+            &item,
+            &ApiRequestInput {
+                url: "https://api.example.test/v1/items".into(),
+                method: "post".into(),
+                path: String::new(),
+                query,
+                headers: HashMap::new(),
+                body: None,
+            },
+        );
+        assert_eq!(description, "API POST https://api.example.test/v1/items");
+        assert!(!description.contains("token"));
+        assert!(!description.contains("must-not-be-logged"));
     }
 
     #[test]

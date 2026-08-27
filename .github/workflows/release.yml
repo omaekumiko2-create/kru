@@ -275,4 +275,9 @@ jobs:
       - name: Create GitHub release
         env:
           GH_TOKEN: ${{ github.token }}
-        run: gh release create "$GITHUB_REF_NAME" release-assets/* --generate-notes --title "KRU $GITHUB_REF_NAME"
+        run: >-
+          gh release create "$GITHUB_REF_NAME" release-assets/*
+          --repo "$GITHUB_REPOSITORY"
+          --verify-tag
+          --generate-notes
+          --title "KRU $GITHUB_REF_NAME"

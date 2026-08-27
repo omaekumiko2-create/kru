@@ -5,7 +5,8 @@ use crate::{
         Activity, ApiAuthHeader, AppState, ConnectionInput, ImportSummary, ItemModule, McpState,
         NewActivity, OwnerEditorDraft, OwnerSecretField, OwnerSecretView, PublicConnection,
         SecretBundle, SecretField, SecretProfile, SecurityState, Settings, SettingsPatch,
-        StoredConnection, StoredEditorDraft, VaultDocument, normalize_item_capabilities,
+        StoredConnection, StoredEditorDraft, VaultDocument, module_kind_has_plaintext_reveal,
+        normalize_item_capabilities,
     },
 };
 use anyhow::{Context, Result, bail};
@@ -1000,7 +1001,7 @@ fn normalize_modules(modules: Vec<ItemModule>) -> Result<Vec<ItemModule>> {
             bail!("不支持的模块：{}", module.kind);
         }
         if module.agent_visible.is_none() {
-            module.agent_visible = Some(!module.is_secret());
+            module.agent_visible = Some(!module_kind_has_plaintext_reveal(&module.kind));
         }
         if module.kind != "customSecret" {
             if singleton_kinds.contains(&module.kind) {
@@ -1132,16 +1133,7 @@ fn push_module(modules: &mut Vec<ItemModule>, kind: &str, name: &str, value: &st
         kind: kind.to_owned(),
         name: name.to_owned(),
         value: value.to_owned(),
-        agent_visible: Some(!matches!(
-            kind,
-            "username"
-                | "password"
-                | "apiCredential"
-                | "privateKey"
-                | "passphrase"
-                | "totp"
-                | "customSecret"
-        )),
+        agent_visible: Some(!module_kind_has_plaintext_reveal(kind)),
     });
 }
 
@@ -1752,6 +1744,46 @@ fn random_token() -> Result<String> {
 mod tests {
     use super::*;
     use tempfile::tempdir;
+
+    #[test]
+    fn module_normalization_preserves_editor_order() {
+        let modules = vec![
+            ItemModule {
+                kind: "url".to_owned(),
+                name: String::new(),
+                value: "https://example.test".to_owned(),
+                agent_visible: None,
+            },
+            ItemModule {
+                kind: "password".to_owned(),
+                name: String::new(),
+                value: String::new(),
+                agent_visible: None,
+            },
+            ItemModule {
+                kind: "host".to_owned(),
+                name: String::new(),
+                value: "example.test".to_owned(),
+                agent_visible: None,
+            },
+        ];
+
+        let normalized = normalize_modules(modules).unwrap();
+        assert_eq!(
+            normalized
+                .iter()
+                .map(|module| module.kind.as_str())
+                .collect::<Vec<_>>(),
+            vec!["url", "password", "host"]
+        );
+        assert_eq!(
+            normalized
+                .iter()
+                .map(|module| module.agent_visible)
+                .collect::<Vec<_>>(),
+            vec![Some(true), Some(false), Some(true)]
+        );
+    }
 
     fn api_input(id: Option<Uuid>, name: &str, token: &str) -> ConnectionInput {
         let mut secrets = SecretBundle::default();

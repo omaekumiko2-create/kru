@@ -230,18 +230,22 @@ pub struct ItemModule {
     pub agent_visible: Option<bool>,
 }
 
+pub(crate) fn module_kind_has_plaintext_reveal(kind: &str) -> bool {
+    matches!(
+        kind,
+        "username"
+            | "password"
+            | "apiCredential"
+            | "privateKey"
+            | "passphrase"
+            | "totp"
+            | "customSecret"
+    )
+}
+
 impl ItemModule {
     pub fn is_secret(&self) -> bool {
-        matches!(
-            self.kind.as_str(),
-            "username"
-                | "password"
-                | "apiCredential"
-                | "privateKey"
-                | "passphrase"
-                | "totp"
-                | "customSecret"
-        )
+        module_kind_has_plaintext_reveal(&self.kind)
     }
 
     pub fn secret_name(&self) -> Option<&str> {
@@ -258,7 +262,8 @@ impl ItemModule {
     }
 
     pub fn agent_visible(&self) -> bool {
-        self.agent_visible.unwrap_or(!self.is_secret())
+        self.agent_visible
+            .unwrap_or(!module_kind_has_plaintext_reveal(&self.kind))
     }
 }
 
@@ -276,7 +281,8 @@ pub struct PublicItemModule {
 
 impl PublicItemModule {
     pub fn agent_visible(&self) -> bool {
-        self.agent_visible.unwrap_or(!self.secret)
+        self.agent_visible
+            .unwrap_or(!module_kind_has_plaintext_reveal(&self.kind))
     }
 }
 
@@ -827,4 +833,61 @@ pub struct AppState {
 pub struct ImportSummary {
     pub added: usize,
     pub merged: usize,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{ItemModule, module_kind_has_plaintext_reveal};
+
+    #[test]
+    fn plaintext_reveal_capability_drives_default_agent_visibility() {
+        for kind in [
+            "username",
+            "password",
+            "apiCredential",
+            "privateKey",
+            "passphrase",
+            "totp",
+            "customSecret",
+        ] {
+            let module = ItemModule {
+                kind: kind.to_owned(),
+                name: String::new(),
+                value: String::new(),
+                agent_visible: None,
+            };
+            assert!(module_kind_has_plaintext_reveal(kind));
+            assert!(!module.agent_visible());
+        }
+
+        for kind in ["host", "port", "url"] {
+            let module = ItemModule {
+                kind: kind.to_owned(),
+                name: String::new(),
+                value: String::new(),
+                agent_visible: None,
+            };
+            assert!(!module_kind_has_plaintext_reveal(kind));
+            assert!(module.agent_visible());
+        }
+    }
+
+    #[test]
+    fn explicit_agent_visibility_overrides_the_module_default() {
+        let visible_secret = ItemModule {
+            kind: "password".to_owned(),
+            name: String::new(),
+            value: String::new(),
+            agent_visible: Some(true),
+        };
+        let hidden_public_value = ItemModule {
+            kind: "host".to_owned(),
+            name: String::new(),
+            value: String::new(),
+            agent_visible: Some(false),
+        };
+
+        assert!(visible_secret.agent_visible());
+        assert!(!hidden_public_value.agent_visible());
+    }
 }

@@ -82,7 +82,7 @@ const staticCopy = [
   ['.template-copy strong', 'text', '从一个组合开始', 'START WITH A PRESET'],
   ['.template-copy small', 'text', '模板只添加模块，不会限制之后的修改。', 'Templates only add modules; you can change anything afterward.'],
   ['.module-editor-heading > div > strong', 'text', '项目模块', 'ITEM MODULES'],
-  ['.module-editor-heading > div > small', 'text', '左侧开关控制明文是否对 Agent 可见', 'LEFT SWITCH: AGENT PLAINTEXT VISIBILITY'],
+  ['.module-editor-heading > div > small', 'text', '拖动模块的非按钮区域调整顺序 · 开关控制 Agent 可见性', 'DRAG ANY NON-BUTTON AREA TO REORDER · SWITCH CONTROLS AGENT VISIBILITY'],
   ['#add-module-button', 'text', '＋ 添加模块', '+ ADD MODULE'],
   ['#module-menu [data-add-module="username"]', 'text', '账号', 'USERNAME'],
   ['#module-menu [data-add-module="password"]', 'text', '密码', 'PASSWORD'],
@@ -737,6 +737,14 @@ const MODULE_DEFS = {
   url: { code: 'URL', zh: '服务 URL', en: 'SERVICE URL', secret: false },
 };
 
+function moduleHasPlaintextReveal(kind) {
+  return Boolean(MODULE_DEFS[kind]?.secret);
+}
+
+function defaultModuleAgentVisible(kind) {
+  return !moduleHasPlaintextReveal(kind);
+}
+
 function moduleSecretName(module) {
   return module.kind === 'customSecret' ? String(module.name || '').trim() : MODULE_DEFS[module.kind]?.secret ? module.kind : '';
 }
@@ -749,17 +757,20 @@ function moduleLabel(kind) {
 function syncModuleDraft() {
   const rows = $$('.module-row', $('#module-list'));
   if (!rows.length) return;
-  currentModules = rows.map((row) => ({
-    kind: row.dataset.kind,
-    name: $('[data-module-name]', row)?.value ?? row.dataset.name ?? '',
-    value: $('[data-module-value]', row)?.value ?? '',
-    secretValue: $('[data-secret-value]', row)?.value ?? '',
-    configured: row.dataset.configured === 'true',
-    existing: row.dataset.existing === 'true',
-    privateKeyName: row.dataset.privateKeyName || '',
-    pending: row.dataset.pending === 'true',
-    agentVisible: $('[data-module-agent-visible]', row)?.getAttribute('aria-pressed') === 'true',
-  }));
+  currentModules = rows.map((row, index) => {
+    row.dataset.moduleIndex = String(index);
+    return {
+      kind: row.dataset.kind,
+      name: $('[data-module-name]', row)?.value ?? row.dataset.name ?? '',
+      value: $('[data-module-value]', row)?.value ?? '',
+      secretValue: $('[data-secret-value]', row)?.value ?? '',
+      configured: row.dataset.configured === 'true',
+      existing: row.dataset.existing === 'true',
+      privateKeyName: row.dataset.privateKeyName || '',
+      pending: row.dataset.pending === 'true',
+      agentVisible: $('[data-module-agent-visible]', row)?.getAttribute('aria-pressed') === 'true',
+    };
+  });
 }
 
 function editorModule(kind) {
@@ -784,7 +795,7 @@ function renderModules() {
   }
   container.innerHTML = currentModules.map((module, index) => {
     const definition = MODULE_DEFS[module.kind] || MODULE_DEFS.customSecret;
-    const agentVisible = typeof module.agentVisible === 'boolean' ? module.agentVisible : !definition.secret;
+    const agentVisible = typeof module.agentVisible === 'boolean' ? module.agentVisible : defaultModuleAgentVisible(module.kind);
     const agentVisibilityLabel = agentVisible
       ? localized('Agent 可查看此值', 'Agent can see this value')
       : localized('不向 Agent 显示此值', 'Hidden from agent');
@@ -797,7 +808,8 @@ function renderModules() {
     if (module.kind === 'privateKey') {
       const keyState = module.pending ? module.privateKeyName : module.configured ? (module.privateKeyName || 'IMPORTED KEY') : localized('尚未导入', 'NOT IMPORTED');
       control = `<div class="module-key-control"><span>${escapeHtml(keyState)}</span><button type="button" class="copy-secret-button" data-choose-module-key>SELECT</button></div>${module.secretValue ? `<div class="secret-input-control module-secret-control multiline module-key-secret"><textarea class="input textarea secret-masked" data-secret-value readonly>${escapeHtml(module.secretValue)}</textarea></div>` : '<input type="hidden" data-secret-value value="" />'}`;
-      if (module.secretValue) actions = `${secretActionButton('reveal')}${secretActionButton('copy')}`;
+      const keyActionsDisabled = !module.secretValue;
+      actions = `${secretActionButton('reveal', true, keyActionsDisabled)}${secretActionButton('copy', true, keyActionsDisabled)}`;
     } else if (definition.secret) {
       const placeholder = module.kind === 'totp' ? localized('Base32 设置密钥', 'BASE32 SETUP KEY') : localized('输入秘密值', 'ENTER SECRET VALUE');
       control = `<div class="secret-input-control module-secret-control"><input class="input" data-secret-value type="password" autocomplete="off" value="${escapeHtml(module.secretValue || '')}" placeholder="${placeholder}" /></div>`;
@@ -814,14 +826,15 @@ function renderModules() {
   updateModuleStatus();
 }
 
-function secretActionButton(kind, secret = true) {
+function secretActionButton(kind, secret = true, disabled = false) {
+  const disabledAttribute = disabled ? ' disabled' : '';
   if (kind === 'reveal') {
     const label = localized('显示明文', 'Show secret');
-    return `<button type="button" class="reveal-secret-button secret-icon-button module-action-icon" data-toggle-module-secret aria-pressed="false" aria-label="${label}" title="${label}"><svg viewBox="0 0 20 20" aria-hidden="true"><path d="M3 10s2.4-4.75 7-4.75S17 10 17 10s-2.4 4.75-7 4.75S3 10 3 10Z"/><circle cx="10" cy="10" r="2.5"/><path class="secret-icon-slash" d="M3.5 3.5l13 13"/></svg></button>`;
+    return `<button type="button" class="reveal-secret-button secret-icon-button module-action-icon" data-toggle-module-secret aria-pressed="false" aria-label="${label}" title="${label}"${disabledAttribute}><svg viewBox="0 0 20 20" aria-hidden="true"><path d="M3 10s2.4-4.75 7-4.75S17 10 17 10s-2.4 4.75-7 4.75S3 10 3 10Z"/><circle cx="10" cy="10" r="2.5"/><path class="secret-icon-slash" d="M3.5 3.5l13 13"/></svg></button>`;
   }
   const label = secret ? localized('复制隐私值', 'Copy private value') : localized('复制值', 'Copy value');
   const attribute = secret ? 'data-copy-module-secret' : 'data-copy-module-value';
-  return `<button type="button" class="copy-secret-button secret-icon-button module-action-icon" ${attribute} aria-label="${label}" title="${label}"><svg viewBox="0 0 20 20" aria-hidden="true"><rect x="7" y="7" width="10" height="10"/><path d="M14 7V3H3v11h4"/></svg></button>`;
+  return `<button type="button" class="copy-secret-button secret-icon-button module-action-icon" ${attribute} aria-label="${label}" title="${label}"${disabledAttribute}><svg viewBox="0 0 20 20" aria-hidden="true"><rect x="7" y="7" width="10" height="10"/><path d="M14 7V3H3v11h4"/></svg></button>`;
 }
 
 function positionModuleMenu() {
@@ -872,7 +885,7 @@ function addModule(kind, options = {}) {
     existing: false,
     privateKeyName: '',
     pending: false,
-    agentVisible: !MODULE_DEFS[kind]?.secret,
+    agentVisible: defaultModuleAgentVisible(kind),
     ...options,
   });
   setModuleMenu(false);
@@ -889,14 +902,14 @@ function applyTemplate(template) {
     api: ['apiCredential'],
     blank: [],
   };
-  currentModules = (presets[template] || []).map((kind) => ({ kind, name: kind, value: kind === 'port' ? '22' : '', secretValue: '', configured: false, existing: false, privateKeyName: '', pending: false, agentVisible: !MODULE_DEFS[kind]?.secret }));
+  currentModules = (presets[template] || []).map((kind) => ({ kind, name: kind, value: kind === 'port' ? '22' : '', secretValue: '', configured: false, existing: false, privateKeyName: '', pending: false, agentVisible: defaultModuleAgentVisible(kind) }));
   $('#template-picker').classList.add('hidden');
   renderModules();
 }
 
 function legacyModules(item, ownerValues) {
   const modules = [];
-  const add = (kind, name = kind, value = '') => { if (!modules.some((module) => module.kind === kind)) modules.push({ kind, name, value, secretValue: ownerValues[name] || '', configured: Boolean(ownerValues[name]), existing: true, agentVisible: !MODULE_DEFS[kind]?.secret }); };
+  const add = (kind, name = kind, value = '') => { if (!modules.some((module) => module.kind === kind)) modules.push({ kind, name, value, secretValue: ownerValues[name] || '', configured: Boolean(ownerValues[name]), existing: true, agentVisible: defaultModuleAgentVisible(kind) }); };
   if (item.host) { add('host', '', item.host); add('port', '', String(item.port || 22)); }
   for (const field of item.secret?.fields || []) {
     const kind = field.name === 'token' || field.name === 'apiKey' || field.name === 'api_key' ? 'apiCredential' : MODULE_DEFS[field.name] ? field.name : 'customSecret';
@@ -946,12 +959,12 @@ async function openEditor(item = null, draft = null) {
   currentModules = item
     ? ((item.modules?.length ? item.modules : legacyModules(item, ownerValues)).map((module) => {
         const secretName = module.kind === 'customSecret' ? module.name : module.kind;
-        return { ...module, secretValue: ownerValues[secretName] || '', configured: Boolean(module.configured || ownerValues[secretName]), existing: true, privateKeyName: module.kind === 'privateKey' ? item.privateKeyName || '' : '', pending: false, agentVisible: typeof module.agentVisible === 'boolean' ? module.agentVisible : !MODULE_DEFS[module.kind]?.secret };
+        return { ...module, secretValue: ownerValues[secretName] || '', configured: Boolean(module.configured || ownerValues[secretName]), existing: true, privateKeyName: module.kind === 'privateKey' ? item.privateKeyName || '' : '', pending: false, agentVisible: typeof module.agentVisible === 'boolean' ? module.agentVisible : defaultModuleAgentVisible(module.kind) };
       }))
     : draft
       ? (draft.input?.modules || []).map((module) => {
           const secretName = module.kind === 'customSecret' ? module.name : module.kind;
-          return { ...module, secretValue: ownerValues[secretName] || '', configured: Boolean(ownerValues[secretName]), existing: false, privateKeyName: module.kind === 'privateKey' ? draft.input?.secrets?.privateKeyName || '' : '', pending: false, agentVisible: typeof module.agentVisible === 'boolean' ? module.agentVisible : !MODULE_DEFS[module.kind]?.secret };
+          return { ...module, secretValue: ownerValues[secretName] || '', configured: Boolean(ownerValues[secretName]), existing: false, privateKeyName: module.kind === 'privateKey' ? draft.input?.secrets?.privateKeyName || '' : '', pending: false, agentVisible: typeof module.agentVisible === 'boolean' ? module.agentVisible : defaultModuleAgentVisible(module.kind) };
         })
       : [];
   value('#ssh-fingerprint', item?.hostFingerprint);
@@ -1380,6 +1393,116 @@ document.addEventListener('input', (event) => {
     renderActivity();
   }
   if (page === 'settings') applySettingsSearch();
+});
+
+let draggedModuleRow = null;
+let moduleDropTarget = null;
+let moduleDropAfter = false;
+let moduleDragPreview = null;
+let modulePointerDrag = null;
+let suppressModuleClick = false;
+const moduleList = $('#module-list');
+function clearModuleDropSeam() {
+  $$('.module-row.drop-before, .module-row.drop-after', moduleList).forEach((row) => row.classList.remove('drop-before', 'drop-after'));
+  moduleDropTarget = null;
+  moduleDropAfter = false;
+}
+
+function beginModulePointerDrag(event) {
+  draggedModuleRow = modulePointerDrag.row;
+  draggedModuleRow.classList.add('is-dragging');
+  moduleList.classList.add('is-sorting');
+  document.body.classList.add('module-pointer-dragging');
+  const definition = MODULE_DEFS[draggedModuleRow.dataset.kind] || MODULE_DEFS.customSecret;
+  moduleDragPreview = document.createElement('div');
+  moduleDragPreview.className = 'module-drag-preview';
+  moduleDragPreview.innerHTML = `<b>${escapeHtml(definition.code)}</b><span>${escapeHtml(moduleLabel(draggedModuleRow.dataset.kind))}</span>`;
+  document.body.appendChild(moduleDragPreview);
+  modulePointerDrag.started = true;
+  try { draggedModuleRow.setPointerCapture(event.pointerId); } catch (_) { /* document tracking remains active */ }
+}
+
+function updateModuleDropSeam(clientY) {
+  clearModuleDropSeam();
+  const rows = $$('.module-row', moduleList);
+  if (!rows.length) return;
+  const seams = rows.map((row) => ({ row, after: false, y: row.getBoundingClientRect().top }));
+  const lastRow = rows.at(-1);
+  seams.push({ row: lastRow, after: true, y: lastRow.getBoundingClientRect().bottom });
+  const closest = seams.reduce((best, seam) => Math.abs(clientY - seam.y) < Math.abs(clientY - best.y) ? seam : best);
+  moduleDropTarget = closest.row;
+  moduleDropAfter = closest.after;
+  moduleDropTarget.classList.add(moduleDropAfter ? 'drop-after' : 'drop-before');
+}
+
+function positionModuleDragPreview(clientX, clientY) {
+  if (moduleDragPreview) moduleDragPreview.style.transform = `translate3d(${Math.round(clientX + 14)}px, ${Math.round(clientY + 14)}px, 0)`;
+}
+
+function autoScrollModuleEditor(clientY) {
+  const scroller = $('.form-scroll', $('#connection-modal'));
+  if (!scroller) return;
+  const bounds = scroller.getBoundingClientRect();
+  if (clientY < bounds.top + 34) scroller.scrollTop -= 12;
+  else if (clientY > bounds.bottom - 34) scroller.scrollTop += 12;
+}
+
+function finishModulePointerDrag(commit) {
+  if (!modulePointerDrag) return;
+  const { row, pointerId, started } = modulePointerDrag;
+  if (started && commit && moduleDropTarget) {
+    moduleList.insertBefore(row, moduleDropAfter ? moduleDropTarget.nextElementSibling : moduleDropTarget);
+  }
+  try { if (row.hasPointerCapture(pointerId)) row.releasePointerCapture(pointerId); } catch (_) { /* capture may already be released */ }
+  row.classList.remove('is-dragging');
+  moduleList.classList.remove('is-sorting');
+  document.body.classList.remove('module-pointer-dragging');
+  moduleDragPreview?.remove();
+  moduleDragPreview = null;
+  draggedModuleRow = null;
+  modulePointerDrag = null;
+  clearModuleDropSeam();
+  if (started) syncModuleDraft();
+}
+
+moduleList.addEventListener('dragstart', (event) => event.preventDefault());
+moduleList.addEventListener('pointerdown', (event) => {
+  if (event.button !== 0 || !event.isPrimary || event.target.closest?.('button')) return;
+  const row = event.target.closest?.('.module-row');
+  if (!row) return;
+  modulePointerDrag = { row, pointerId: event.pointerId, startX: event.clientX, startY: event.clientY, started: false };
+});
+document.addEventListener('pointermove', (event) => {
+  if (!modulePointerDrag || event.pointerId !== modulePointerDrag.pointerId) return;
+  if (!modulePointerDrag.started && Math.hypot(event.clientX - modulePointerDrag.startX, event.clientY - modulePointerDrag.startY) < 6) return;
+  if (!modulePointerDrag.started) beginModulePointerDrag(event);
+  event.preventDefault();
+  autoScrollModuleEditor(event.clientY);
+  updateModuleDropSeam(event.clientY);
+  positionModuleDragPreview(event.clientX, event.clientY);
+}, { passive: false });
+document.addEventListener('pointerup', (event) => {
+  if (!modulePointerDrag || event.pointerId !== modulePointerDrag.pointerId) return;
+  if (modulePointerDrag.started) {
+    event.preventDefault();
+    suppressModuleClick = true;
+    setTimeout(() => { suppressModuleClick = false; }, 0);
+  }
+  finishModulePointerDrag(true);
+});
+document.addEventListener('pointercancel', (event) => {
+  if (modulePointerDrag?.pointerId === event.pointerId) finishModulePointerDrag(false);
+});
+document.addEventListener('click', (event) => {
+  if (!suppressModuleClick) return;
+  suppressModuleClick = false;
+  if (event.target.closest?.('.module-row')) {
+    event.preventDefault();
+    event.stopImmediatePropagation();
+  }
+}, true);
+window.addEventListener('blur', () => {
+  if (modulePointerDrag) finishModulePointerDrag(false);
 });
 
 document.addEventListener('paste', (event) => {

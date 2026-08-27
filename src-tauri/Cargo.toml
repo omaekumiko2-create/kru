@@ -1,6 +1,6 @@
 [package]
 name = "kru"
-version = "0.10.0"
+version = "0.11.0"
 description = "Local credential relay unit for AI agents"
 authors = ["KRU contributors"]
 license = "MIT"

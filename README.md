@@ -3,7 +3,7 @@
 </p>
 
 <p align="center">
-  <strong>A tiny, completely free, no-account, cross-platform password vault and input tool for AI agents.</strong>
+  <strong>A local MCP credential relay that keeps agent workflows moving without exposing hidden plaintext.</strong>
 </p>
 
 <p align="center">
@@ -13,7 +13,7 @@
 <p align="center">
   <a href="../../releases/latest"><strong>Download</strong></a>
   &nbsp;&nbsp;·&nbsp;&nbsp;
-  <a href="README.zh-CN.md">Chinese</a>
+  <a href="README.zh-CN.md">中文</a>
   &nbsp;&nbsp;·&nbsp;&nbsp;
   <a href="SECURITY.md">Security</a>
 </p>
@@ -22,71 +22,70 @@
 
 ## Use KRU like this
 
-No commands to memorize and no credentials to paste into the conversation. Just give the agent a KRU item name and a task:
+Once KRU is connected, describe the task normally. Include the unique KRU item name for the most reliable match, or simply tell the agent to check KRU when authentication is needed.
 
-| Use case | Say this to your agent |
+| Goal | Example |
 | --- | --- |
-| **Item name + task** | `Use the KRU item "TraceScale GPU VPS" to check GPU, disk, and Docker status.` |
-| **Use when authentication is needed** | `Continue the deployment. If sign-in or authentication is required, use KRU.` |
-| **Connect to a server** | `Use the KRU item "Production VPS" to connect, deploy the current project, and verify the service.` |
-| **Call an API** | `Use the KRU item "Cloudflare API" to list the domains in this account.` |
-| **Sign in on the web** | `Open the Cloudflare dashboard. When it asks for an account, password, or code, use the KRU item "Cloudflare Account".` |
+| **Server task** | `Use "Production Server" in KRU MCP to deploy the current build and verify the service.` |
+| **Authenticated API** | `Use "DNS Provider" in KRU MCP to list the domains in this account.` |
+| **Browser sign-in** | `Open the admin console. When credentials are required, use "Admin Account" in KRU MCP.` |
+| **Automatic lookup** | `Continue the task. If authentication is required, check KRU first.` |
 
-The item name is the name saved in KRU. Naming it explicitly is most precise; when you are unsure, the agent can choose from the items KRU exposes.
+The quoted text is the item name saved in KRU. If you omit it, the agent can inspect KRU's item list and choose a match.
 
 ## What KRU does
 
-KRU is a local MCP tool that keeps agent workflows moving without exposing plaintext passwords or other credentials to the agent. The agent hands off the final authentication step, and KRU performs it locally.
+KRU is a small local MCP tool for saving and using credentials without breaking an agent's workflow. The agent controls the task, while KRU performs the final credential operation locally—filling a focused field, authenticating an SSH session, or sending an authenticated API request.
 
-Usernames, passwords, API credentials, private keys, TOTP, hosts, ports, and URLs are saved as independent modules that can be freely combined into login, SSH, API, or mixed items.
+KRU stores credentials as independent modules rather than fixed “login / SSH / API” item types. Username, password, API credential, private key, key passphrase, TOTP, host, port, URL, and custom fields can be combined in one item. The available MCP actions are derived automatically from that combination.
 
-There is no KRU account, subscription, or cloud vault. The app is completely free and open source, runs on Windows, macOS, and Linux, and encrypts its vault locally.
-
-Its local `stdio` MCP starts only when an agent calls it—there is no always-on remote service.
+There is no KRU account, subscription, cloud vault, or remote MCP service. KRU is free and open source, runs on Windows, macOS, and Linux, and keeps vault data encrypted on the current device. Its local `stdio` MCP starts only when an agent calls it.
 
 <table>
   <tr>
-    <td width="33%"><strong>01 / STORE</strong><br><br>Credentials are encrypted on your machine. No KRU account or cloud vault.</td>
-    <td width="33%"><strong>02 / RELAY</strong><br><br>The agent sees available field names and actions—not hidden values.</td>
-    <td width="33%"><strong>03 / ACT</strong><br><br>KRU performs the final fill, SSH authentication, or API authentication locally.</td>
+    <td width="33%"><strong>01 / STORE</strong><br><br>Save only the modules the item needs. Values are encrypted locally.</td>
+    <td width="33%"><strong>02 / DISCOVER</strong><br><br>The agent sees item names, field names, non-secret targets, and available actions.</td>
+    <td width="33%"><strong>03 / USE</strong><br><br>KRU performs the selected credential action locally without returning hidden plaintext.</td>
   </tr>
 </table>
 
 <p align="center">
-  <img src=".github/assets/kru-flow.svg" alt="Agent delegates the final authentication step to KRU" width="100%" />
+  <img src=".github/assets/kru-flow.svg" alt="Agent delegates the credential step to KRU" width="100%" />
 </p>
 
 ## Start in three steps
 
 1. **Download and open KRU**
-   Use the portable build for your platform. There is no account to create.
+   Choose the portable build for your platform. No registration is required.
 
 2. **Connect your agent**
-   Open **System → Agent connection** and register a supported client.
+   Open **Settings → Agent connection**, connect a detected client, then start a new agent session.
 
-3. **Save one item and start a new session**
-   Add only the modules you need, then start a new agent session with KRU available.
+3. **Save an item**
+   Give it a unique name and add only the modules you need. You can start from a preset or build the item module by module.
 
-KRU registers a local `stdio` MCP command. It starts when the agent needs it; no remote MCP endpoint is exposed.
+KRU registers a local `stdio` MCP command. The MCP process starts on demand when the agent calls it.
 
-## One vault, several last-mile actions
+## One item, several actions
 
-| Action | What the agent decides | What KRU does locally |
+| Action | When KRU advertises it | What happens locally |
 | --- | --- | --- |
-| **Fill** | Field, timing, and focused target | Types the selected value into a browser, desktop control, or managed terminal |
-| **SSH** | Host task and command | Authenticates with the stored password or private key and enforces the saved command policy |
-| **HTTP** | Method, path, query, and body | Injects the stored API credential and sends the constrained request |
-| **Terminal** | Program flow and input timing | Hosts the interactive process and writes a selected secret without returning it |
+| **Fill** | The item contains a credential module | KRU writes the selected value into a focused browser, desktop control, or managed terminal |
+| **SSH** | Host + port + username + password/private key | KRU authenticates locally and runs the command requested by the agent |
+| **HTTP** | The item contains an API credential | KRU injects authentication and sends the constrained request |
+| **Terminal** | The agent opens a managed terminal | KRU can write a selected secret without returning it to the agent |
 
-Items are assembled from independent modules instead of fixed “login / SSH / API” types. A single item can expose more than one action when its module combination supports it.
+An item may advertise more than one action. KRU has no observation, diagnostic, restricted, or execution mode: if `ssh_execute` is available, the agent sends the command the task actually requires.
 
-## Plaintext stays under your control
+## Plaintext visibility is per module
 
-Each module has its own Agent visibility switch:
+Every module has its own Agent visibility switch:
 
-- **Hidden** — the default for secret modules. The agent may ask KRU to use the value but does not receive it.
-- **Visible** — KRU may return that module value to the agent when you explicitly enable it.
+- **Hidden** — the default for credential modules. KRU can use the value, but it is not included in MCP responses.
+- **Visible** — the value may be returned to the agent only after you explicitly enable the switch.
 - **TOTP** — KRU derives the current six-digit code; the permanent seed is never returned.
+
+The eye and copy controls in the editor are for the local owner. The optional six-digit PIN locks plaintext viewing in the GUI; it does not replace vault encryption and does not disable MCP actions.
 
 ## Built for local use
 
@@ -98,32 +97,60 @@ Each module has its own Agent visibility switch:
   </tr>
 </table>
 
+## Browser, SSH, and API behavior
+
 ### Browser filling
 
-Unattended browser filling uses the bundled Chromium extension. KRU supplies one selected field to the currently focused control; it does not inspect the page, choose a field, click submit, or export cookies. Chrome, Edge, and Brave require one manual extension load on first use.
+Reliable unattended browser filling uses the bundled Chromium extension. KRU writes one selected field into the currently focused control; it does not inspect the page, choose a field, click submit, or export cookies. Chrome, Edge, and Brave require one manual extension load on first use.
 
-### Local PIN
+### SSH
 
-The six-digit PIN locks plaintext viewing in the GUI. It is an owner-view lock, not the vault encryption key. KRU has no PIN recovery flow in the current release.
+KRU supports password and private-key authentication. The server fingerprint is recorded on first connection and must be explicitly reset if the host identity changes. Authentication plaintext is not returned to the agent.
+
+### HTTP APIs
+
+KRU recognizes common API providers and falls back to Bearer Token when no provider matches. A saved service URL locks requests to the same origin. Without one, the agent must provide an absolute HTTPS URL; plain HTTP is allowed only for loopback addresses.
+
+## Local app controls
+
+The Settings page includes:
+
+- desktop shortcut (where supported) and launch-at-login controls;
+- close-to-tray or quit behavior;
+- optional six-digit local PIN;
+- Agent connection and repair;
+- Browser Bridge pairing;
+- encrypted backup import/export and direct access to the local data folder.
+
+Replacing or upgrading the executable does not remove your vault. KRU intentionally reuses the current OS user's data directory:
+
+| Platform | Vault location |
+| --- | --- |
+| Windows | `%APPDATA%\mcp-vault\v2` |
+| macOS | `~/Library/Application Support/mcp-vault/v2` |
+| Linux | `${XDG_DATA_HOME:-~/.local/share}/mcp-vault/v2` |
+
+Exported `.mvault` packages are encrypted and portable, but they contain their own unlock material for easy import. Protect a backup file as carefully as the original credentials.
 
 ## Downloads
 
-All release builds are portable archives.
-
 | Target | Package | Notes |
 | --- | --- | --- |
-| Windows x64 | `.zip` | GUI, tray, desktop input, browser extension |
+| Windows x64 | `.zip` | Portable GUI, tray, desktop input, and browser extension |
 | macOS arm64 | `.zip` | Native `.app`; Accessibility permission is required for desktop input |
-| Linux x64 | `.tar.gz` | AppImage GUI; desktop input supports X11 |
+| Linux x64 GUI | `.tar.gz` | AppImage GUI; desktop input supports X11 |
 | Linux x64 headless | `.tar.gz` | No WebView dependency; MCP, SSH, HTTP, terminal, backup, and browser bridge |
 
 <p align="center">
   <a href="../../releases/latest"><strong>OPEN LATEST RELEASE →</strong></a>
 </p>
 
-## MCP surface
+<details>
+  <summary>Watch the short product demo</summary>
+  <p><a href="https://www.youtube.com/watch?v=GKQLEgAdbTU">KRU demo on YouTube →</a></p>
+</details>
 
-KRU intentionally exposes a small tool set:
+## MCP surface
 
 ```text
 vault_items_list
@@ -133,7 +160,7 @@ api_request
 terminal_open · terminal_input · terminal_read · terminal_close
 ```
 
-There is no unrestricted `get_secret` tool. `vault_items_list` returns item IDs, module metadata, non-secret target information, and derived actions. A module value is included only when its Agent visibility switch is on.
+There is no unrestricted `get_secret` tool. `vault_items_list` returns item and module metadata, non-secret target information, and derived actions. A credential value is included only when its Agent visibility switch is on.
 
 Manual `stdio` configuration:
 
@@ -157,9 +184,9 @@ kru config stdio-toml
 
 ## Security model
 
-KRU is designed to keep secrets out of normal MCP parameters, responses, application logs, and LLM API traffic. The KRU process and the final target necessarily handle plaintext briefly while an action runs.
+KRU is designed to keep hidden values out of normal MCP parameters, responses, activity records, application logs, and LLM API traffic. The KRU process and the final target necessarily handle plaintext briefly while an action runs.
 
-KRU does **not** defend against a malicious agent, a compromised machine, a browser debugger, or another process running as the same OS user. It cannot determine whether the agent focused the correct input or chose a trustworthy target. Read the complete [security policy and threat boundary](SECURITY.md) before relying on KRU for sensitive infrastructure.
+KRU is not a sandbox. It does not defend against a malicious agent, a compromised machine or browser, or another process running as the same OS user. It cannot determine whether the agent focused the correct input or chose a trustworthy target. Read the complete [security policy and threat boundary](SECURITY.md) before relying on KRU for sensitive infrastructure.
 
 ## Build from source
 

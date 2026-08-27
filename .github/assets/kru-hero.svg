@@ -1,6 +1,6 @@
 <svg xmlns="http://www.w3.org/2000/svg" width="1400" height="720" viewBox="0 0 1400 720" role="img" aria-labelledby="title desc">
   <title id="title">KRU — Key Relay Unit</title>
-  <desc id="desc">KRU is a tiny, free, no-account, cross-platform password vault and input tool for AI agents.</desc>
+  <desc id="desc">KRU is a local MCP credential relay that keeps agent workflows moving without exposing hidden plaintext.</desc>
   <style>
     .sans{font-family:Bahnschrift,"Segoe UI Variable","Segoe UI",Arial,sans-serif}
     .mono{font-family:"Cascadia Mono",Consolas,monospace}
@@ -25,14 +25,13 @@
   <g transform="translate(72 120)">
     <text y="108" class="sans ink" font-size="116" font-weight="300" letter-spacing="8">KRU</text>
     <line x1="276" y1="18" x2="276" y2="112" class="rule"/>
-    <text x="318" y="54" class="sans ink" font-size="35" font-weight="600">A MODULAR PASSWORD VAULT</text>
-    <text x="318" y="102" class="sans ink" font-size="35" font-weight="600">AND INPUT TOOL FOR AI AGENTS.</text>
+    <text x="318" y="54" class="sans ink" font-size="35" font-weight="600">A LOCAL MCP CREDENTIAL RELAY</text>
+    <text x="318" y="102" class="sans ink" font-size="35" font-weight="600">FOR UNINTERRUPTED AGENT WORKFLOWS.</text>
     <g transform="translate(1032 14)">
-      <text class="mono muted" font-size="9" letter-spacing="1.4">WINDOWS APP</text>
-      <text y="39" class="instrument ink" font-size="38" font-weight="300">8.55</text>
-      <text x="88" y="38" class="mono muted" font-size="10">MiB</text>
+      <text class="mono muted" font-size="9" letter-spacing="1.4">LOCAL MCP</text>
+      <text y="39" class="instrument ink" font-size="38" font-weight="300">STDIO</text>
       <line y1="55" x2="152" y2="55" class="softRule"/>
-      <text y="78" class="mono muted" font-size="9" letter-spacing="1.4">PORTABLE ZIP / 3.84 MiB</text>
+      <text y="78" class="mono muted" font-size="9" letter-spacing="1.4">NO CLOUD / NO ACCOUNT</text>
     </g>
   </g>
 
@@ -104,7 +103,7 @@
   <g transform="translate(72 584)">
     <g class="mono" font-size="11" font-weight="700">
       <rect width="190" height="48" class="orange"/>
-      <text x="95" y="30" text-anchor="middle" class="paper">UNDER 10 MB</text>
+      <text x="95" y="30" text-anchor="middle" class="paper">LOCAL MCP</text>
       <rect x="202" width="190" height="48" class="paper" stroke="#bbb6b2"/>
       <text x="297" y="30" text-anchor="middle" class="ink">OPEN SOURCE</text>
       <rect x="404" width="190" height="48" fill="#5e605f"/>

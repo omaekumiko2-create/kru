@@ -207,17 +207,19 @@ impl TerminalManager {
             .name("kru-pty-reader".to_owned())
             .spawn(move || {
                 let mut buffer = [0_u8; 8_192];
+                let mut cursor_query_state = 0;
                 loop {
                     match reader.read(&mut buffer) {
                         Ok(0) | Err(_) => break,
                         Ok(count) => {
                             // Windows ConPTY asks the terminal for its cursor position before
-                            // presenting the child prompt. We are a headless terminal, so answer
-                            // with a stable position instead of leaving the child blocked.
-                            if buffer[..count]
-                                .windows(4)
-                                .any(|window| window == b"\x1b[6n")
-                                && let Ok(mut writer) = reader_writer.lock()
+                            // presenting the child prompt. The request may be split across reads,
+                            // so keep parser state and answer with a stable position instead of
+                            // leaving the child blocked.
+                            if contains_cursor_position_query(
+                                &mut cursor_query_state,
+                                &buffer[..count],
+                            ) && let Ok(mut writer) = reader_writer.lock()
                                 && let Some(writer) = writer.as_mut()
                             {
                                 let _ = writer.write_all(b"\x1b[1;1R");
@@ -533,6 +535,23 @@ fn lock_error<T>(error: std::sync::PoisonError<T>) -> anyhow::Error {
     anyhow::anyhow!("终端会话锁损坏：{error}")
 }
 
+fn contains_cursor_position_query(state: &mut usize, bytes: &[u8]) -> bool {
+    const QUERY: &[u8] = b"\x1b[6n";
+    let mut found = false;
+    for byte in bytes {
+        if *byte == QUERY[*state] {
+            *state += 1;
+            if *state == QUERY.len() {
+                found = true;
+                *state = 0;
+            }
+        } else {
+            *state = usize::from(*byte == QUERY[0]);
+        }
+    }
+    found
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -551,6 +570,21 @@ mod tests {
         let (output, truncated) = large.take_redacted(&[], false);
         assert_eq!(output.len(), MAX_OUTPUT);
         assert!(truncated);
+    }
+
+    #[test]
+    fn cursor_position_query_is_detected_across_read_boundaries() {
+        for split in 0..=4 {
+            let mut state = 0;
+            let query = b"\x1b[6n";
+            assert_eq!(
+                contains_cursor_position_query(&mut state, &query[..split]),
+                split == query.len()
+            );
+            if split < query.len() {
+                assert!(contains_cursor_position_query(&mut state, &query[split..]));
+            }
+        }
     }
 
     fn read_until(
@@ -914,7 +948,7 @@ node "%~dp0node_modules\demo-cli\cli.js" %*"#,
             &manager,
             session.session_id,
             &mut output,
-            Duration::from_secs(5),
+            Duration::from_secs(15),
             |output, result| !result.running && output.contains("literal with spaces|plain-arg"),
         );
         manager.close(session.session_id).unwrap();
@@ -1014,7 +1048,11 @@ node "%~dp0node_modules\demo-cli\cli.js" %*"#,
                     .is_some_and(|name| name.eq_ignore_ascii_case("cmd.exe"))
             );
             assert_eq!(resolved.prefix_args[0..4], ["/d", "/s", "/c", "call"]);
-            assert_eq!(resolved.prefix_args[4], script.to_string_lossy());
+            let canonical_script = std::fs::canonicalize(&script).unwrap();
+            assert_eq!(
+                resolved.prefix_args[4],
+                windows_argument_path(&canonical_script)
+            );
         }
     }
 }

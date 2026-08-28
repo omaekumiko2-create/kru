@@ -1117,9 +1117,6 @@ html.platform-macos .nav-item small { line-height: 7px; }
 .desktop-option > .input { width: 124px; min-height: 30px; height: 30px; padding: 1px 7px 0; font-family: var(--mono); font-size: 7px; line-height: 27px; }
 
 .key-file-control { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 8px; }
-.trust-control { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 1px; background: var(--line-soft); }
-.trust-control .input { min-width: 0; background: var(--field); border: var(--rule-width) solid var(--line-soft); box-shadow: none; font-family: var(--mono); font-size: 8px; }
-.trust-control .button { min-width: 88px; box-shadow: none; }
 .field-note { display: block; margin-top: 5px; color: var(--muted); font-size: 8px; line-height: 1.4; }
 .security-warning { display: grid; grid-template-columns: 120px minmax(0, 1fr); align-items: center; gap: 9px; padding: 9px 10px; color: #fff; background: var(--orange-dark); }
 .security-warning strong { font-family: var(--mono); font-size: 8px; font-weight: 600; letter-spacing: .08em; }
@@ -1329,12 +1326,9 @@ html.platform-macos .nav-item small { line-height: 7px; }
 .modal-card .copy-secret-button,
 .modal-card .reveal-secret-button { min-width: 48px; padding: 0 8px; font-size: 8px; }
 .modal-card .secret-icon-button { width: 26px; min-width: 26px; padding: 0; }
-.modal-card .trust-control .button { min-width: 58px; min-height: 34px; padding: 0 8px; font-size: 7px; }
 .modal-card .secret-input-control,
-.modal-card .trust-control,
 .modal-card .key-file-control { min-height: 34px; align-items: stretch; }
 .modal-card .secret-input-control > button,
-.modal-card .trust-control > button,
 .modal-card .key-file-control > button { height: 34px; min-height: 34px; align-self: start; }
 
 .input {
@@ -1519,7 +1513,6 @@ html.platform-macos .nav-item small { line-height: 7px; }
 .lock-note,
 .modal-title-mark small,
 .modal-card .field em,
-.modal-card .trust-control .button,
 .template-grid button > b,
 .module-key-control > span,
 .module-key-view summary { font-size: 8px; }

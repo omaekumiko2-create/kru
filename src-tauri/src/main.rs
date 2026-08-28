@@ -8,16 +8,12 @@ use anyhow::{Context, Result};
 use mcp_vault::crypto::MasterKey;
 #[cfg(feature = "gui")]
 use mcp_vault::run_gui;
-use mcp_vault::{backup, browser::BrowserBridge, mcp, model::SettingsPatch, vault::Vault};
+use mcp_vault::{
+    backup, browser::BrowserBridge, mcp, model::SettingsPatch, storage::app_data_dir, vault::Vault,
+};
+use std::env;
 use std::time::{Duration, Instant};
-use std::{env, path::PathBuf};
 use tokio::time::sleep;
-
-fn app_data_dir() -> Result<PathBuf> {
-    dirs::data_dir()
-        .map(|path| path.join("mcp-vault").join("v2"))
-        .context("无法确定本机数据目录")
-}
 
 #[tokio::main]
 async fn main() {

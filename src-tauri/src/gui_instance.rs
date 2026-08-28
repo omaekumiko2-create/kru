@@ -34,6 +34,7 @@ impl GuiInstance {
         let descriptor_path = data_dir.join("gui-instance.json");
         let lock = OpenOptions::new()
             .create(true)
+            .truncate(false)
             .read(true)
             .write(true)
             .open(&lock_path)

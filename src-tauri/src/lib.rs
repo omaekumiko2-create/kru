@@ -7,6 +7,7 @@ pub mod mcp;
 pub mod model;
 pub mod policy;
 pub mod runtime_epoch;
+pub mod storage;
 pub mod terminal;
 pub mod vault;
 

@@ -101,13 +101,10 @@ const staticCopy = [
   ['[data-item-template="ssh"] > span', 'html', 'SSH<small>主机 + 端口 + 账号 + 密码</small>', 'SSH<small>HOST + PORT + USER + PASSWORD</small>'],
   ['[data-item-template="api"] > span', 'html', 'API<small>API 凭据</small>', 'API<small>API CREDENTIAL</small>'],
   ['[data-item-template="blank"] > span', 'html', '空白<small>从零添加模块</small>', 'BLANK<small>START WITH NO MODULES</small>'],
-  ['#ssh-fingerprint', 'label-html', '服务器身份指纹 <em>与密码/私钥无关</em>', 'SERVER FINGERPRINT <em>INDEPENDENT OF LOGIN METHOD</em>'],
-  ['#ssh-fingerprint', 'placeholder', '首次连接自动记录', 'RECORDED ON FIRST CONNECTION'],
-  ['#ssh-options summary', 'text', 'SSH 服务器身份', 'SSH SERVER IDENTITY'],
   ['.check-row strong', 'text', '启用此项目', 'ENABLE ITEM'],
   ['.check-row small', 'text', '禁用后 Agent 无法使用', 'Agents cannot use a disabled item.'],
   ['.secret-hint', 'text', '当前项目的明文只在已解锁 GUI 中显示', 'Plaintext is visible only in the unlocked GUI.'],
-  ['#connection-form .modal-footer [data-close-modal]', 'text', '取消', 'CANCEL'],
+  ['#connection-form .modal-footer [data-close-modal]', 'text', '关闭', 'CLOSE'],
   ['#save-connection-button', 'text', '保存', 'SAVE'],
 ];
 
@@ -165,7 +162,6 @@ const api = {
   setEnabled: (id, enabled) => invoke('set_connection_enabled', { id, enabled }),
   remove: (id) => invoke('delete_connection', { id }),
   test: (id) => invoke('test_connection', { id }),
-  resetTrust: (id) => invoke('reset_ssh_fingerprint', { id }),
   settings: updateSettings,
   systemIntegration: () => invoke('system_integration_status'),
   setDesktopShortcut: (enabled) => invoke('set_desktop_shortcut', { enabled }),
@@ -196,6 +192,9 @@ let editorDrafts = [];
 let currentDraftId = '';
 let removedSecretFields = new Set();
 let editorExistingItem = null;
+let editorSourceInput = null;
+let editorOpenedFromDraft = false;
+let editorInitialSnapshot = '';
 let agentClients = [];
 let agentRestartRequired = false;
 const ACTIVITY_PAGE_SIZE = 50;
@@ -591,7 +590,10 @@ function renderDrafts() {
   const hasDraft = Boolean(editorDrafts[0]);
   const deleteButton = $('#delete-draft-button');
   button.disabled = !hasDraft;
-  button.title = hasDraft ? localized('继续编辑唯一草稿', 'Continue the saved draft') : localized('暂无草稿', 'No draft');
+  button.textContent = hasDraft
+    ? localized(`草稿 ${editorDrafts.length}`, `DRAFTS ${editorDrafts.length}`)
+    : localized('草稿', 'DRAFT');
+  button.title = hasDraft ? localized('继续最近的草稿', 'Continue the most recent draft') : localized('暂无草稿', 'No draft');
   deleteButton.classList.toggle('hidden', !hasDraft);
   deleteButton.title = localized('删除草稿', 'Delete draft');
 }
@@ -781,7 +783,6 @@ function moduleConfigured(module) {
 
 function updateModuleStatus() {
   syncModuleDraft();
-  $('#ssh-options').classList.toggle('hidden', !currentModules.some((module) => ['host', 'port', 'privateKey'].includes(module.kind)));
 }
 
 function renderModules() {
@@ -915,9 +916,19 @@ function value(selector, next) {
   return element.value;
 }
 
+function updateEditorTitle() {
+  $('#modal-title').textContent = editorOpenedFromDraft
+    ? (editorExistingItem ? localized('继续编辑', 'CONTINUE EDIT') : localized('继续草稿', 'CONTINUE DRAFT'))
+    : (editorExistingItem ? localized('编辑项目', 'EDIT ITEM') : localized('添加项目', 'ADD ITEM'));
+}
+
 async function openEditor(item = null, draft = null) {
+  if (!draft && item) draft = editorDrafts.find((candidate) => candidate.input?.id === item.id) || null;
+  if (!item && draft?.input?.id) item = state.connections.find((candidate) => candidate.id === draft.input.id) || null;
   let ownerValues = {};
-  if (item) {
+  if (draft) {
+    ownerValues = draftSecretValues(draft.input?.secrets);
+  } else if (item) {
     try {
       const view = await api.ownerSecrets(item.id);
       ownerValues = Object.fromEntries(view.fields.map((field) => [field.name, field.value]));
@@ -926,40 +937,36 @@ async function openEditor(item = null, draft = null) {
       await refreshOwnerLock(false);
       return;
     }
-  } else if (draft) {
-    ownerValues = draftSecretValues(draft.input?.secrets);
   }
-  const source = item || draft?.input || null;
+  const source = draft?.input || item || null;
   removedSecretFields = new Set();
   editorExistingItem = item;
+  editorSourceInput = source;
+  editorOpenedFromDraft = Boolean(draft);
   currentDraftId = draft?.id || '';
   value('#connection-id', item?.id);
   value('#connection-name', source?.name);
   value('#connection-description', source?.description);
   $('#connection-enabled').checked = source?.enabled ?? true;
-  $('#modal-title').textContent = item ? localized('编辑项目', 'EDIT ITEM') : draft ? localized('继续草稿', 'CONTINUE DRAFT') : localized('添加项目', 'ADD ITEM');
+  updateEditorTitle();
   $('#template-picker').classList.toggle('hidden', Boolean(item || draft?.input?.modules?.length));
-  currentModules = item
-    ? ((item.modules || []).map((module) => {
-        const secretName = module.kind === 'customSecret' ? module.name : module.kind;
-        return { ...module, secretValue: ownerValues[secretName] || '', configured: Boolean(module.configured || ownerValues[secretName]), existing: true, privateKeyName: module.kind === 'privateKey' ? item.privateKeyName || '' : '', pending: false, agentVisible: typeof module.agentVisible === 'boolean' ? module.agentVisible : defaultModuleAgentVisible(module.kind) };
-      }))
-    : draft
-      ? (draft.input?.modules || []).map((module) => {
-          const secretName = module.kind === 'customSecret' ? module.name : module.kind;
-          return { ...module, secretValue: ownerValues[secretName] || '', configured: Boolean(ownerValues[secretName]), existing: false, privateKeyName: module.kind === 'privateKey' ? draft.input?.secrets?.privateKeyName || '' : '', pending: false, agentVisible: typeof module.agentVisible === 'boolean' ? module.agentVisible : defaultModuleAgentVisible(module.kind) };
-        })
-      : [];
-  value('#ssh-fingerprint', item?.hostFingerprint);
-  $('#reset-ssh-trust').classList.toggle('hidden', !(itemCapabilities(item || {}).includes('ssh') && item?.hostFingerprint));
+  currentModules = (source?.modules || []).map((module) => {
+    const secretName = module.kind === 'customSecret' ? module.name : module.kind;
+    const privateKeyName = draft?.input?.secrets?.privateKeyName || item?.privateKeyName || '';
+    return { ...module, secretValue: ownerValues[secretName] || '', configured: Boolean(module.configured || ownerValues[secretName]), existing: Boolean(item), privateKeyName: module.kind === 'privateKey' ? privateKeyName : '', pending: false, agentVisible: typeof module.agentVisible === 'boolean' ? module.agentVisible : defaultModuleAgentVisible(module.kind) };
+  });
   renderModules();
   $('#connection-modal').classList.remove('hidden');
   $('.form-scroll', $('#connection-modal')).scrollTop = 0;
+  editorInitialSnapshot = JSON.stringify(serializeItem(false));
 }
 
 function closeEditor() {
   $('#connection-modal').classList.add('hidden');
   setModuleMenu(false);
+  editorSourceInput = null;
+  editorOpenedFromDraft = false;
+  editorInitialSnapshot = '';
 }
 
 function collectModules(validate = true) {
@@ -1001,7 +1008,14 @@ function serializeItem(validate = true) {
     name,
     description: value('#connection-description'),
     enabled: $('#connection-enabled').checked,
-    httpAuthType: 'auto',
+    httpAuthType: editorSourceInput?.httpAuthType || 'auto',
+    authHeader: editorSourceInput?.authHeader || '',
+    authLocation: editorSourceInput?.authLocation || '',
+    authPrefix: editorSourceInput?.authPrefix || '',
+    apiAuthHeaders: editorSourceInput?.apiAuthHeaders || [],
+    allowedMethods: editorSourceInput?.allowedMethods || [],
+    allowedPathPrefixes: editorSourceInput?.allowedPathPrefixes || [],
+    testPath: editorSourceInput?.testPath || '',
     privateKeyImportPath: collected.privateKeyImportPath,
     removeSecretNames: [...removedSecretFields],
     secrets: collected.secrets,
@@ -1014,17 +1028,17 @@ function editorHasDraftContent() {
 }
 
 async function closeEditorWithDraft() {
-  if (editorExistingItem) {
-    closeEditor();
-    return;
-  }
   try {
-    if (!editorHasDraftContent()) {
+    const input = serializeItem(false);
+    const changed = JSON.stringify(input) !== editorInitialSnapshot;
+    if (!editorHasDraftContent() && !editorExistingItem) {
       if (currentDraftId) await api.deleteDraft(currentDraftId);
-    } else {
-      const saved = await api.saveDraft(currentDraftId || null, serializeItem(false));
+    } else if (changed || editorOpenedFromDraft || !editorExistingItem) {
+      const saved = await api.saveDraft(currentDraftId || null, input);
       currentDraftId = saved.id;
-      toast(localized('草稿已加密保存', 'Draft saved and encrypted'));
+      toast(editorExistingItem
+        ? localized('未保存修改已保留，可随时继续', 'Unsaved changes kept for later')
+        : localized('草稿已加密保存', 'Draft saved and encrypted'));
     }
     await refreshDrafts();
     closeEditor();
@@ -1117,9 +1131,7 @@ async function setLanguage(next) {
     render();
     updateAuthFields();
     if (!$('#connection-modal').classList.contains('hidden')) renderModules();
-    if (!$('#connection-modal').classList.contains('hidden')) {
-      $('#modal-title').textContent = value('#connection-id') ? localized('编辑项目', 'EDIT ITEM') : currentDraftId ? localized('继续草稿', 'CONTINUE DRAFT') : localized('添加项目', 'ADD ITEM');
-    }
+    if (!$('#connection-modal').classList.contains('hidden')) updateEditorTitle();
     try {
       state.settings = await api.settings({ language });
     } catch (error) {
@@ -1190,7 +1202,7 @@ document.addEventListener('click', async (event) => {
     if (!confirm(localized('删除当前草稿？此操作无法撤销。', 'Delete the current draft? This cannot be undone.'))) return;
     try {
       await api.deleteDraft(editorDrafts[0].id);
-      editorDrafts = [];
+      editorDrafts = editorDrafts.slice(1);
       renderDrafts();
       toast(localized('草稿已删除', 'Draft deleted'));
     } catch (error) { toast(cleanError(error), 'error'); }
@@ -1518,17 +1530,11 @@ $('#connection-form').addEventListener('submit', async (event) => {
   button.disabled = true;
   try {
     const input = serializeItem();
-    const existing = state.connections.find((item) => item.id === input.id);
-    const nextHost = input.modules.find((module) => module.kind === 'host')?.value || '';
-    const nextPort = Number(input.modules.find((module) => module.kind === 'port')?.value || 0);
-    const trustReset = Boolean(existing && itemCapabilities(existing).includes('ssh') && (existing.host.toLocaleLowerCase() !== nextHost.toLocaleLowerCase() || existing.port !== nextPort));
     await api.save(input);
     if (currentDraftId) await api.deleteDraft(currentDraftId);
     currentDraftId = '';
     closeEditor();
-    toast(trustReset
-      ? localized('地址已变化 · 旧主机信任已清除，下次连接将重新固定', 'Address changed · Old host trust cleared; the next connection will pin the new host')
-      : localized('项目已加密保存', 'Item saved and encrypted'));
+    toast(localized('项目已加密保存', 'Item saved and encrypted'));
     await refresh();
     await refreshDrafts();
   } catch (error) { toast(cleanError(error), 'error'); } finally { button.disabled = false; }
@@ -1568,7 +1574,6 @@ $('#owner-pin-cancel').addEventListener('click', () => {
   renderOwnerLock();
   renderSettings();
 });
-$('#reset-ssh-trust').addEventListener('click', async () => { const id = value('#connection-id'); if (!id || !confirm(localized('重置后，下次连接将固定新的服务器指纹。继续？', 'After reset, the next connection will pin a new server fingerprint. Continue?'))) return; try { await api.resetTrust(id); value('#ssh-fingerprint', ''); $('#reset-ssh-trust').classList.add('hidden'); toast(localized('SSH 主机信任已重置', 'SSH host trust reset')); } catch (error) { toast(cleanError(error), 'error'); } });
 $('#clear-activity-button').addEventListener('click', async () => { if (!confirm(localized('清空本地操作记录？', 'Clear the local activity log?'))) return; await api.clear(); currentActivityFilter = 'all'; pageSearch.activity = ''; expandedActivityErrors.clear(); $('[data-page-search="activity"]').value = ''; await refresh(); });
 $('#save-browser-settings-button').addEventListener('click', saveBrowserSettings);
 $('#browser-enabled').addEventListener('change', saveBrowserSettings);

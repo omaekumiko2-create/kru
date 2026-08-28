@@ -611,8 +611,8 @@ impl AgentRegistry {
                 vec!["mcp", "unset", "kru"]
             };
             let output = self.run_cli_action(&executable, &args).await?;
-            if !output.status.success()
-                && !(action == "remove" && is_missing_entry(&output_text(&output)))
+            if !(output.status.success()
+                || action == "remove" && is_missing_entry(&output_text(&output)))
             {
                 bail!("{}", clean_process_error(&output_text(&output)));
             }
@@ -1012,7 +1012,7 @@ fn is_runnable_file(path: &Path) -> bool {
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
-        return fs::metadata(path).is_ok_and(|metadata| metadata.permissions().mode() & 0o111 != 0);
+        fs::metadata(path).is_ok_and(|metadata| metadata.permissions().mode() & 0o111 != 0)
     }
     #[cfg(not(unix))]
     true

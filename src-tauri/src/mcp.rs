@@ -2,7 +2,8 @@ use crate::{
     browser::{BrowserBridge, current_totp},
     desktop,
     executor::{
-        ApiRequestInput, ApiResponse, SshResponse, describe_api_request, execute_api, execute_ssh,
+        ApiRequestInput, ApiResponse, SshResponse, SshTransferResponse, describe_api_request,
+        execute_api, execute_ssh, ssh_download, ssh_upload,
     },
     model::NewActivity,
     terminal::{TerminalManager, TerminalOpenResult, TerminalReadResult},
@@ -188,6 +189,8 @@ impl VaultMcp {
                 }
                 if decrypted.stored.has_capability("ssh") {
                     actions.push("ssh_run".to_owned());
+                    actions.push("ssh_upload".to_owned());
+                    actions.push("ssh_download".to_owned());
                 }
                 if decrypted.stored.has_capability("http") {
                     actions.push("http_send".to_owned());
@@ -269,6 +272,7 @@ struct ItemModuleOutput {
 struct CredentialFillOutput {
     target: String,
     module: String,
+    submitted: bool,
 }
 
 #[derive(Debug, Serialize, JsonSchema)]
@@ -287,6 +291,30 @@ struct SshRunInput {
     #[serde(default)]
     #[schemars(description = "Optional remote working directory.")]
     cwd: Option<String>,
+    #[serde(default)]
+    #[schemars(
+        description = "Optional execution timeout in seconds. Omit or use 0 for no command deadline."
+    )]
+    timeout_seconds: Option<u64>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct SshTransferInput {
+    #[schemars(description = "Item ID returned by items_search for an SSH-capable item.")]
+    item_id: String,
+    #[schemars(description = "Local file path on the machine running KRU.")]
+    local_path: String,
+    #[schemars(description = "Remote file path on the SSH host.")]
+    remote_path: String,
+    #[serde(default = "default_true")]
+    #[schemars(description = "Replace an existing destination file. Defaults to true.")]
+    overwrite: bool,
+    #[serde(default)]
+    #[schemars(
+        description = "Optional transfer timeout in seconds. Omit or use 0 for no total deadline."
+    )]
+    timeout_seconds: Option<u64>,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -296,7 +324,10 @@ struct HttpSendInput {
         description = "Item ID returned by items_search for an item advertising http_send."
     )]
     item_id: String,
-    #[schemars(description = "Absolute request URL.")]
+    #[serde(default)]
+    #[schemars(
+        description = "Optional absolute URL or path relative to the project's saved service URL. Omit to request the saved service URL itself. An item without a saved service URL requires an absolute URL."
+    )]
     url: String,
     #[serde(default = "default_http_method")]
     #[schemars(description = "HTTP method. Defaults to GET.")]
@@ -310,10 +341,43 @@ struct HttpSendInput {
     #[serde(default)]
     #[schemars(description = "Optional JSON request body.")]
     body: Option<Value>,
+    #[serde(default)]
+    #[schemars(description = "Optional URL-encoded form fields. Array values repeat a field.")]
+    form: HashMap<String, Value>,
+    #[serde(default)]
+    #[schemars(description = "Optional multipart file uploads from local paths.")]
+    files: Vec<crate::executor::ApiUploadFile>,
+    #[serde(default)]
+    #[schemars(description = "Optional Base64-encoded raw request body.")]
+    body_base64: Option<String>,
+    #[serde(default)]
+    #[schemars(
+        description = "Optional request timeout in seconds. Omit or use 0 for no total deadline."
+    )]
+    timeout_seconds: Option<u64>,
+    #[serde(default)]
+    #[schemars(
+        description = "Optional in-context response-body limit in bytes. Defaults to 1 MiB and may be raised to 16 MiB. Not used when saveResponseTo is set."
+    )]
+    max_response_bytes: Option<usize>,
+    #[serde(default)]
+    #[schemars(
+        description = "Optional local file path for streaming the complete response body without the in-context size limit. Parent directories are created automatically."
+    )]
+    save_response_to: Option<String>,
+    #[serde(default = "default_true")]
+    #[schemars(
+        description = "Replace an existing response file. Defaults to true and only applies with saveResponseTo."
+    )]
+    overwrite_response_file: bool,
 }
 
 fn default_http_method() -> String {
     "GET".to_owned()
+}
+
+fn default_true() -> bool {
+    true
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -332,13 +396,18 @@ struct CredentialFillInput {
         description = "Required when target=terminal; use the session ID returned by terminal_start."
     )]
     session_id: Option<String>,
+    #[serde(default)]
+    #[schemars(
+        description = "Submit after filling. For terminal and desktop targets this presses Enter; for browser targets it submits the focused field's form when one exists. Defaults to false."
+    )]
+    submit: bool,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct TerminalStartInput {
     #[schemars(
-        description = "Program name or path selected by the agent. KRU starts it directly without a shell."
+        description = "Program name or path selected by the agent. Native executables start directly; Windows .cmd and .bat scripts use cmd.exe."
     )]
     program: String,
     #[serde(default)]
@@ -384,7 +453,7 @@ impl VaultMcp {
 
     #[tool(
         name = "credential_fill",
-        description = "Write one stored module to a paired browser, the real operating-system foreground control, or a KRU-managed terminal without returning hidden plaintext. Call items_search first. Prefer browser for browser automation. KRU never submits or presses Enter.",
+        description = "Use one stored module in a paired browser, the real operating-system foreground control, or a KRU-managed terminal without returning hidden plaintext. Set submit=true to complete the focused form or press Enter in the same call.",
         output_schema = rmcp::handler::server::tool::schema_for_type::<CredentialFillOutput>(),
         annotations(title = "Fill a credential", read_only_hint = false, destructive_hint = false, idempotent_hint = false, open_world_hint = true)
     )]
@@ -399,6 +468,7 @@ impl VaultMcp {
                 _ => return Err("target 必须是 browser、desktop 或 terminal".to_owned()),
             };
             let module = input.module;
+            let submit = input.submit;
             self.track(item_id, format!("向 {target} 填写模块 {module}"), async {
                 let (_, kind, mut value) = self
                     .vault
@@ -409,13 +479,13 @@ impl VaultMcp {
                 }
                 match target.as_str() {
                     "browser" => {
-                        let result = self.browser.fill_value(value).await?;
+                        let result = self.browser.fill_value(value, submit).await?;
                         if result.status != "ok" {
                             bail!("{}", result.message);
                         }
                     }
                     "desktop" => {
-                        tokio::task::spawn_blocking(move || desktop::fill_focused(&value))
+                        tokio::task::spawn_blocking(move || desktop::fill_focused(&value, submit))
                             .await
                             .context("桌面输入任务失败")??;
                     }
@@ -426,14 +496,18 @@ impl VaultMcp {
                             .context("target=terminal 时必须提供 sessionId")?;
                         let session_id = Uuid::parse_str(session_id)
                             .map_err(|_| anyhow::anyhow!("终端会话 ID 无效"))?;
-                        self.terminal.fill_value(session_id, &value)?;
+                        self.terminal.fill_value(session_id, &value, submit)?;
                     }
                     _ => unreachable!(),
                 }
                 Ok(())
             })
             .await?;
-            Ok(CredentialFillOutput { target, module })
+            Ok(CredentialFillOutput {
+                target,
+                module,
+                submitted: submit,
+            })
         }
         .await;
         into_tool_result(result)
@@ -441,7 +515,7 @@ impl VaultMcp {
 
     #[tool(
         name = "terminal_start",
-        description = "Start a program directly in a KRU-managed local PTY. The caller chooses the program and argv; no shell is inserted.",
+        description = "Start a program or script in a KRU-managed local PTY with KRU's normal user environment. The caller chooses the program and argv; Windows .cmd and .bat scripts use the native command processor. This is not a sandbox.",
         output_schema = rmcp::handler::server::tool::schema_for_type::<TerminalOpenResult>(),
         annotations(title = "Open a managed terminal", read_only_hint = false, destructive_hint = false, idempotent_hint = false, open_world_hint = true)
     )]
@@ -458,7 +532,7 @@ impl VaultMcp {
 
     #[tool(
         name = "terminal_write",
-        description = "Write ordinary text to a KRU-managed PTY. credential_fill never adds a newline, so send a newline separately only when submission is intended.",
+        description = "Write ordinary text to a KRU-managed PTY. credential_fill can submit in the same call; use terminal_write for later interactive input.",
         output_schema = rmcp::handler::server::tool::schema_for_type::<OkOutput>(),
         annotations(title = "Write terminal input", read_only_hint = false, destructive_hint = true, idempotent_hint = false, open_world_hint = true)
     )]
@@ -542,6 +616,78 @@ impl VaultMcp {
                     &connection,
                     &input.command,
                     input.cwd.as_deref(),
+                    input.timeout_seconds,
+                ),
+            )
+            .await
+        }
+        .await;
+        into_tool_result(result)
+    }
+
+    #[tool(
+        name = "ssh_upload",
+        description = "Upload one local file through SFTP using an SSH project stored in KRU. Missing remote parent directories are created automatically and existing destination files are replaced by default.",
+        output_schema = rmcp::handler::server::tool::schema_for_type::<SshTransferResponse>(),
+        annotations(title = "Upload a file over SSH", read_only_hint = false, destructive_hint = true, idempotent_hint = false, open_world_hint = true)
+    )]
+    async fn ssh_upload(&self, Parameters(input): Parameters<SshTransferInput>) -> CallToolResult {
+        let result: Result<SshTransferResponse, String> = async {
+            let item_id = Uuid::parse_str(&input.item_id).map_err(|_| "项目 ID 无效".to_owned())?;
+            let connection = self
+                .vault
+                .get_connection(item_id)
+                .map_err(|error| error.to_string())?;
+            if !connection.stored.has_capability("ssh") {
+                return Err("所选项目的模块尚未形成可用 SSH 动作".to_owned());
+            }
+            self.track(
+                item_id,
+                "上传 SSH 文件".to_owned(),
+                ssh_upload(
+                    &self.vault,
+                    &connection,
+                    &input.local_path,
+                    &input.remote_path,
+                    input.overwrite,
+                    input.timeout_seconds,
+                ),
+            )
+            .await
+        }
+        .await;
+        into_tool_result(result)
+    }
+
+    #[tool(
+        name = "ssh_download",
+        description = "Download one remote file through SFTP using an SSH project stored in KRU. Local parent directories are created automatically and existing destination files are replaced by default.",
+        output_schema = rmcp::handler::server::tool::schema_for_type::<SshTransferResponse>(),
+        annotations(title = "Download a file over SSH", read_only_hint = false, destructive_hint = true, idempotent_hint = false, open_world_hint = true)
+    )]
+    async fn ssh_download(
+        &self,
+        Parameters(input): Parameters<SshTransferInput>,
+    ) -> CallToolResult {
+        let result: Result<SshTransferResponse, String> = async {
+            let item_id = Uuid::parse_str(&input.item_id).map_err(|_| "项目 ID 无效".to_owned())?;
+            let connection = self
+                .vault
+                .get_connection(item_id)
+                .map_err(|error| error.to_string())?;
+            if !connection.stored.has_capability("ssh") {
+                return Err("所选项目的模块尚未形成可用 SSH 动作".to_owned());
+            }
+            self.track(
+                item_id,
+                "下载 SSH 文件".to_owned(),
+                ssh_download(
+                    &self.vault,
+                    &connection,
+                    &input.remote_path,
+                    &input.local_path,
+                    input.overwrite,
+                    input.timeout_seconds,
                 ),
             )
             .await
@@ -552,7 +698,7 @@ impl VaultMcp {
 
     #[tool(
         name = "http_send",
-        description = "Send an authenticated HTTP request through KRU without returning hidden credential plaintext. Call items_search first and use only a project advertising http_send. Provide one absolute URL. A saved service URL locks requests to the same origin. Without one, HTTPS is required except for loopback HTTP. Redirects and caller-supplied authentication headers are blocked.",
+        description = "Send an authenticated HTTP request through KRU without returning hidden credential plaintext. Call items_search first and use only a project advertising http_send. With a saved service URL, omit url to use it or pass a relative path; an absolute URL must remain on the same origin. Without a saved service URL, provide an absolute HTTPS URL (loopback HTTP is also allowed). Any valid HTTP method is accepted and same-origin redirects are followed. KRU overwrites headers used for its configured authentication. Large response bodies can be streamed directly to a local file with saveResponseTo.",
         output_schema = rmcp::handler::server::tool::schema_for_type::<ApiResponse>(),
         annotations(title = "Send an authenticated API request", read_only_hint = false, destructive_hint = true, idempotent_hint = false, open_world_hint = true)
     )]
@@ -572,8 +718,15 @@ impl VaultMcp {
                 query: input.query,
                 headers: input.headers,
                 body: input.body,
+                form: input.form,
+                files: input.files,
+                body_base64: input.body_base64,
+                timeout_seconds: input.timeout_seconds,
+                max_response_bytes: input.max_response_bytes,
+                save_response_to: input.save_response_to,
+                overwrite_response_file: input.overwrite_response_file,
             };
-            let action = describe_api_request(&request);
+            let action = describe_api_request(&connection.stored, &request);
             self.track(item_id, action, execute_api(&connection, request))
                 .await
         }
@@ -586,7 +739,7 @@ impl VaultMcp {
 impl ServerHandler for VaultMcp {
     fn get_info(&self) -> ServerInfo {
         ServerInfo::new(ServerCapabilities::builder().enable_tools().build()).with_instructions(
-            "KRU is a local, non-agentic credential execution tool. Before asking the user to provide a credential, call items_search. When the user names a KRU project, pass that name as query and prefer the exact match. Use only actions advertised by the selected project. A module includes value only when the user explicitly made it agent-visible; never request, guess, or try to extract a missing value. Let KRU perform hidden authentication through credential_fill, ssh_run, or http_send. KRU has no observation, diagnostic, restricted, or execution mode. For browser automation, prefer credential_fill with target=browser and the paired extension. Use target=desktop only when the real operating-system foreground focus is guaranteed. KRU never submits a filled value automatically.",
+            "KRU lets agents use locally saved credentials without receiving hidden plaintext. Search for the named project with items_search, then use one of its returned actions. Use credential_fill with submit=true when the focused login can be completed immediately. KRU does not impose observation, diagnostic, restricted, or execution modes.",
         )
     }
 
@@ -629,9 +782,7 @@ fn display_client_name(raw_name: &str) -> String {
 
 pub async fn serve_stdio(vault: Vault) -> Result<()> {
     let data_dir = vault.data_dir().to_path_buf();
-    let launcher = launcher_executable()?;
-    let build_id = crate::runtime_epoch::activate_build(&data_dir, &launcher)?;
-    crate::runtime_epoch::exit_process_when_changed(data_dir, build_id)?;
+    crate::runtime_epoch::monitor_until_invalidated(data_dir)?;
     let server = VaultMcp::new(vault);
     let browser = server.browser.clone();
     browser.sync().await;
@@ -856,7 +1007,7 @@ mod tests {
         assert!(text.contains("password"));
         assert_eq!(
             listed["items"][0]["actions"],
-            json!(["credential_fill", "ssh_run"])
+            json!(["credential_fill", "ssh_run", "ssh_upload", "ssh_download"])
         );
         for removed in ["type", "capabilities", "description", "fields", "target"] {
             assert!(
@@ -930,6 +1081,8 @@ mod tests {
             ("terminal_read", true, false, true, false),
             ("terminal_stop", false, true, true, false),
             ("ssh_run", false, true, false, true),
+            ("ssh_upload", false, true, false, true),
+            ("ssh_download", false, true, false, true),
             ("http_send", false, true, false, true),
         ];
         for (name, read_only, destructive, idempotent, open_world) in expected {
@@ -985,6 +1138,33 @@ mod tests {
             }))
             .is_err()
         );
+    }
+
+    #[test]
+    fn low_friction_defaults_submit_only_when_requested_and_replace_transfer_targets() {
+        let fill = serde_json::from_value::<CredentialFillInput>(json!({
+            "itemId": Uuid::new_v4().to_string(),
+            "module": "password",
+            "target": "browser"
+        }))
+        .unwrap();
+        assert!(!fill.submit);
+
+        let transfer = serde_json::from_value::<SshTransferInput>(json!({
+            "itemId": Uuid::new_v4().to_string(),
+            "localPath": "C:\\fixture.bin",
+            "remotePath": "/tmp/fixture.bin"
+        }))
+        .unwrap();
+        assert!(transfer.overwrite);
+
+        let response = serde_json::from_value::<HttpSendInput>(json!({
+            "itemId": Uuid::new_v4().to_string(),
+            "url": "https://example.test/file",
+            "saveResponseTo": "C:\\fixture.bin"
+        }))
+        .unwrap();
+        assert!(response.overwrite_response_file);
     }
 
     #[tokio::test]

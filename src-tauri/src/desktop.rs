@@ -1,18 +1,20 @@
 use anyhow::{Context, Result, bail};
-use enigo::{Enigo, Keyboard, Settings};
+use enigo::{Direction, Enigo, Key, Keyboard, Settings};
 
-const MAX_FILL_BYTES: usize = 64_000;
+// Keep desktop filling aligned with the managed terminal and SSH command path.
+// A private key or certificate bundle can legitimately exceed the old 64 KB
+// ceiling, while a 1 MiB guard still prevents an accidental unbounded keystroke
+// injection into the foreground application.
+const MAX_FILL_BYTES: usize = 1_048_576;
 
-pub fn fill_focused(value: &str) -> Result<()> {
-    if value.len() > MAX_FILL_BYTES {
-        bail!("秘密字段过长，无法通过桌面输入写入");
-    }
-    if value.contains('\0') {
-        bail!("秘密字段包含桌面输入无法写入的空字符");
-    }
+pub fn fill_focused(value: &str, submit: bool) -> Result<()> {
+    validate_fill_value(value)?;
 
     #[cfg(target_os = "windows")]
     if fill_standard_windows_control(value)? {
+        if submit {
+            press_enter()?;
+        }
         return Ok(());
     }
 
@@ -25,7 +27,31 @@ pub fn fill_focused(value: &str) -> Result<()> {
     }
 
     let mut enigo = Enigo::new(&Settings::default()).context("无法初始化桌面输入")?;
-    enigo.text(value).context("无法向当前焦点控件输入")
+    enigo.text(value).context("无法向当前焦点控件输入")?;
+    if submit {
+        enigo
+            .key(Key::Return, Direction::Click)
+            .context("无法提交当前焦点控件")?;
+    }
+    Ok(())
+}
+
+#[cfg(target_os = "windows")]
+fn press_enter() -> Result<()> {
+    let mut enigo = Enigo::new(&Settings::default()).context("无法初始化桌面输入")?;
+    enigo
+        .key(Key::Return, Direction::Click)
+        .context("无法提交当前焦点控件")
+}
+
+fn validate_fill_value(value: &str) -> Result<()> {
+    if value.len() > MAX_FILL_BYTES {
+        bail!("秘密字段超过 1 MiB，无法通过桌面输入写入");
+    }
+    if value.contains('\0') {
+        bail!("秘密字段包含桌面输入无法写入的空字符");
+    }
+    Ok(())
 }
 
 #[cfg(target_os = "windows")]
@@ -80,4 +106,16 @@ fn fill_standard_windows_control(value: &str) -> Result<bool> {
         bail!("前台输入控件拒绝写入");
     }
     Ok(true)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn desktop_fill_accepts_large_values_up_to_the_shared_boundary() {
+        assert!(validate_fill_value(&"x".repeat(MAX_FILL_BYTES)).is_ok());
+        assert!(validate_fill_value(&"x".repeat(MAX_FILL_BYTES + 1)).is_err());
+        assert!(validate_fill_value("contains\0nul").is_err());
+    }
 }

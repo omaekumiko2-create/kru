@@ -85,7 +85,7 @@ impl MasterKey {
             } else {
                 None
             };
-            return Self::load_or_create_file_key(data_dir, vault_exists, legacy_key);
+            Self::load_or_create_file_key(data_dir, vault_exists, legacy_key)
         }
 
         #[cfg(not(target_os = "macos"))]

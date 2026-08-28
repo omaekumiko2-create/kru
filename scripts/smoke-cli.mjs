@@ -173,6 +173,8 @@ function mcpSmoke() {
         "terminal_read",
         "terminal_stop",
         "ssh_run",
+        "ssh_upload",
+        "ssh_download",
         "http_send",
       ];
       for (const toolName of expectedTools) {

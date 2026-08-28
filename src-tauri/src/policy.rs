@@ -1,17 +1,22 @@
 use crate::model::{SecretBundle, StoredConnection};
 use anyhow::{Result, bail};
 use base64::{Engine, engine::general_purpose::STANDARD};
-use reqwest::header::{HeaderMap, HeaderName};
+use reqwest::header::HeaderMap;
 use std::collections::HashSet;
 use url::Url;
+
+const MAX_SSH_COMMAND_BYTES: usize = 1_048_576;
 
 pub fn validate_ssh_command(command: &str) -> Result<String> {
     let value = command.trim();
     if value.is_empty() {
         bail!("命令不能为空");
     }
-    if value.chars().count() > 4_000 {
-        bail!("命令过长");
+    if value.contains('\0') {
+        bail!("SSH 命令不能包含空字符");
+    }
+    if value.len() > MAX_SSH_COMMAND_BYTES {
+        bail!("SSH 命令超过 1 MiB 上限");
     }
     Ok(value.to_owned())
 }
@@ -22,20 +27,8 @@ pub fn assert_api_request_allowed(
     target: &Url,
 ) -> Result<String> {
     let normalized = method.trim().to_uppercase();
-    if !connection
-        .allowed_methods
-        .iter()
-        .any(|allowed| allowed == &normalized)
-    {
-        bail!("该连接不允许 {normalized} 请求");
-    }
     if connection.base_url.trim().is_empty() {
-        let secure = target.scheme() == "https"
-            || (target.scheme() == "http"
-                && target
-                    .host_str()
-                    .is_some_and(|host| matches!(host, "localhost" | "127.0.0.1" | "::1")));
-        if !secure {
+        if !is_safe_api_url(target) {
             bail!("运行时 API URL 必须使用 HTTPS；仅本机回环地址允许 HTTP");
         }
     } else {
@@ -44,26 +37,23 @@ pub fn assert_api_request_allowed(
             bail!("请求不能离开已保存 API 的域名");
         }
     }
-    if !connection.allowed_path_prefixes.is_empty()
-        && !connection
-            .allowed_path_prefixes
-            .iter()
-            .any(|prefix| target.path().starts_with(prefix))
-    {
-        bail!("请求路径不在允许范围内");
-    }
     Ok(normalized)
 }
 
+pub fn redirect_target_allowed(initial: &Url, target: &Url) -> bool {
+    target.origin() == initial.origin() && is_safe_api_url(target)
+}
+
+fn is_safe_api_url(target: &Url) -> bool {
+    target.scheme() == "https"
+        || (target.scheme() == "http"
+            && target
+                .host_str()
+                .is_some_and(|host| matches!(host, "localhost" | "127.0.0.1" | "::1")))
+}
+
 pub fn blocked_header_names(connection: &StoredConnection) -> HashSet<String> {
-    let mut blocked = [
-        "authorization".to_owned(),
-        "cookie".to_owned(),
-        "host".to_owned(),
-        "proxy-authorization".to_owned(),
-    ]
-    .into_iter()
-    .collect::<HashSet<_>>();
+    let mut blocked = ["host".to_owned()].into_iter().collect::<HashSet<_>>();
     if connection.auth_location != "query" && !connection.auth_header.is_empty() {
         blocked.insert(connection.auth_header.to_lowercase());
     }
@@ -76,24 +66,15 @@ pub fn blocked_header_names(connection: &StoredConnection) -> HashSet<String> {
     blocked
 }
 
-pub fn safe_response_headers(headers: &HeaderMap) -> Vec<(String, String)> {
-    let allowed = [
-        "content-type",
-        "date",
-        "etag",
-        "x-request-id",
-        "retry-after",
-        "ratelimit-remaining",
-        "x-ratelimit-remaining",
-    ];
-    allowed
-        .into_iter()
-        .filter_map(|name| {
-            let header = HeaderName::from_static(name);
-            headers
-                .get(&header)
-                .and_then(|value| value.to_str().ok())
-                .map(|value| (name.to_owned(), value.to_owned()))
+pub fn visible_response_headers(headers: &HeaderMap) -> Vec<(String, String)> {
+    headers
+        .iter()
+        .filter(|(name, _)| !name.as_str().eq_ignore_ascii_case("set-cookie"))
+        .filter_map(|(name, value)| {
+            value
+                .to_str()
+                .ok()
+                .map(|value| (name.as_str().to_owned(), value.to_owned()))
         })
         .collect()
 }
@@ -197,7 +178,7 @@ mod tests {
     }
 
     #[test]
-    fn api_stays_on_origin_and_path() {
+    fn saved_api_stays_on_origin_without_hidden_method_or_path_modes() {
         let connection = connection();
         assert!(
             assert_api_request_allowed(
@@ -215,14 +196,15 @@ mod tests {
             )
             .is_err()
         );
-        assert!(
-            assert_api_request_allowed(
-                &connection,
-                "POST",
-                &Url::parse("https://api.example.com/v1/items").unwrap()
-            )
-            .is_err()
-        );
+        for (method, target) in [
+            ("POST", "https://api.example.com/v1/items"),
+            ("PROPFIND", "https://api.example.com/other/path"),
+        ] {
+            assert!(
+                assert_api_request_allowed(&connection, method, &Url::parse(target).unwrap())
+                    .is_ok()
+            );
+        }
     }
 
     #[test]
@@ -265,6 +247,23 @@ mod tests {
     }
 
     #[test]
+    fn redirects_follow_only_the_same_safe_origin() {
+        let initial = Url::parse("https://api.example.com/v1/items").unwrap();
+        assert!(redirect_target_allowed(
+            &initial,
+            &Url::parse("https://api.example.com/v2/items").unwrap()
+        ));
+        assert!(!redirect_target_allowed(
+            &initial,
+            &Url::parse("https://other.example/v2/items").unwrap()
+        ));
+        assert!(!redirect_target_allowed(
+            &initial,
+            &Url::parse("http://api.example.com/v2/items").unwrap()
+        ));
+    }
+
+    #[test]
     fn redacts_raw_and_bearer_secret() {
         let connection = connection();
         let mut secrets = SecretBundle::default();
@@ -292,19 +291,36 @@ mod tests {
             );
         }
         assert!(validate_ssh_command("  ").is_err());
-        assert!(validate_ssh_command(&"x".repeat(4_001)).is_err());
+        assert!(validate_ssh_command("printf 'a\0b'").is_err());
+        assert!(validate_ssh_command(&"x".repeat(256_000)).is_ok());
+        assert!(validate_ssh_command(&"x".repeat(MAX_SSH_COMMAND_BYTES)).is_ok());
+        assert!(validate_ssh_command(&"x".repeat(MAX_SSH_COMMAND_BYTES + 1)).is_err());
     }
 
     #[test]
-    fn blocks_auth_cookie_proxy_and_configured_auth_header() {
+    fn reserves_only_host_and_headers_that_kru_injects() {
         let blocked = blocked_header_names(&connection());
-        for name in [
-            "authorization",
-            "cookie",
-            "proxy-authorization",
-            "x-api-key",
-        ] {
+        for name in ["host", "x-api-key"] {
             assert!(blocked.contains(name));
         }
+        for name in ["authorization", "cookie", "proxy-authorization"] {
+            assert!(!blocked.contains(name));
+        }
+    }
+
+    #[test]
+    fn response_headers_keep_service_metadata_but_not_set_cookie() {
+        let mut headers = HeaderMap::new();
+        headers.insert("x-feature-state", "ready".parse().unwrap());
+        headers.append("set-cookie", "session=server-secret".parse().unwrap());
+
+        let visible = visible_response_headers(&headers)
+            .into_iter()
+            .collect::<std::collections::HashMap<_, _>>();
+        assert_eq!(
+            visible.get("x-feature-state").map(String::as_str),
+            Some("ready")
+        );
+        assert!(!visible.contains_key("set-cookie"));
     }
 }

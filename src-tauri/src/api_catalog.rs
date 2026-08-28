@@ -19,7 +19,14 @@ const UNKNOWN: ApiProfile = ApiProfile {
     auth_prefix: "Bearer",
 };
 
-const PROFILES: &[(&[&str], &[&str], &[&str], ApiProfile)] = &[
+type ApiProfileEntry = (
+    &'static [&'static str],
+    &'static [&'static str],
+    &'static [&'static str],
+    ApiProfile,
+);
+
+const PROFILES: &[ApiProfileEntry] = &[
     (
         &["api.stripe.com"],
         &["stripe"],

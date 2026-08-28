@@ -43,14 +43,17 @@ struct BrowserJob {
     id: Uuid,
     value: String,
     #[serde(default)]
+    submit: bool,
+    #[serde(default)]
     expires_at: u64,
 }
 
 impl BrowserJob {
-    fn with_deadline(id: Uuid, value: String) -> Self {
+    fn with_deadline(id: Uuid, value: String, submit: bool) -> Self {
         Self {
             id,
             value,
+            submit,
             expires_at: unix_millis().saturating_add(JOB_TIMEOUT.as_millis() as u64),
         }
     }
@@ -331,7 +334,7 @@ impl BrowserBridge {
         Ok(())
     }
 
-    pub async fn fill_value(&self, value: String) -> Result<BrowserFillResult> {
+    pub async fn fill_value(&self, value: String, submit: bool) -> Result<BrowserFillResult> {
         let settings = self.vault.settings()?;
         if !settings.browser_enabled {
             bail!("Browser Bridge 未启用");
@@ -340,7 +343,7 @@ impl BrowserBridge {
             bail!("尚未配对 Chromium 扩展");
         }
         self.ensure_started(settings.browser_port).await?;
-        let job = BrowserJob::with_deadline(Uuid::new_v4(), value);
+        let job = BrowserJob::with_deadline(Uuid::new_v4(), value, submit);
         let response = self
             .client
             .post(format!(
@@ -756,7 +759,7 @@ fn require_bearer(headers: &HeaderMap, expected: &str) -> Result<(), (StatusCode
         .and_then(|value| value.to_str().ok())
         .and_then(|value| value.strip_prefix("Bearer "))
         .unwrap_or("");
-    if supplied.as_bytes().len() == expected.len()
+    if supplied.len() == expected.len()
         && subtle::ConstantTimeEq::ct_eq(supplied.as_bytes(), expected.as_bytes()).into()
     {
         Ok(())
@@ -878,12 +881,13 @@ mod tests {
         jobs.send(BrowserJob::with_deadline(
             Uuid::new_v4(),
             "already queued".to_owned(),
+            false,
         ))
         .await
         .unwrap();
         state.extensions.lock().await.add(Uuid::new_v4(), jobs);
 
-        let mut job = BrowserJob::with_deadline(Uuid::new_v4(), "secret".to_owned());
+        let mut job = BrowserJob::with_deadline(Uuid::new_v4(), "secret".to_owned(), false);
         job.expires_at = unix_millis().saturating_add(100);
         let (result, _receiver) = oneshot::channel();
         state.pending.lock().await.insert(job.id, result);
@@ -900,7 +904,7 @@ mod tests {
         let directory = tempdir().unwrap();
         let state = test_server_state(Vault::open(directory.path().join("vault")).unwrap());
 
-        let mut expired = BrowserJob::with_deadline(Uuid::new_v4(), "expired".to_owned());
+        let mut expired = BrowserJob::with_deadline(Uuid::new_v4(), "expired".to_owned(), false);
         expired.expires_at = unix_millis().saturating_sub(1);
         expired.normalize_deadline();
         let (result, _receiver) = oneshot::channel();
@@ -908,7 +912,7 @@ mod tests {
         assert!(expired.is_expired());
         assert!(!job_is_deliverable(&state, &expired).await);
 
-        let active = BrowserJob::with_deadline(Uuid::new_v4(), "active".to_owned());
+        let active = BrowserJob::with_deadline(Uuid::new_v4(), "active".to_owned(), false);
         let (result, _receiver) = oneshot::channel();
         state.pending.lock().await.insert(active.id, result);
         assert!(job_is_deliverable(&state, &active).await);
@@ -920,7 +924,7 @@ mod tests {
     async fn first_job_waits_briefly_for_extension_reconnect() {
         let directory = tempdir().unwrap();
         let state = test_server_state(Vault::open(directory.path().join("vault")).unwrap());
-        let job = BrowserJob::with_deadline(Uuid::new_v4(), "secret".to_owned());
+        let job = BrowserJob::with_deadline(Uuid::new_v4(), "secret".to_owned(), false);
         let (result, _receiver) = oneshot::channel();
         state.pending.lock().await.insert(job.id, result);
 

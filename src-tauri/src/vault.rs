@@ -13,6 +13,7 @@ use anyhow::{Context, Result, bail};
 use atomic_write_file::AtomicWriteFile;
 use chrono::Utc;
 use fs2::FileExt;
+use reqwest::Method;
 use std::{
     fs::{self, File, OpenOptions},
     io::Write,
@@ -46,6 +47,7 @@ impl Vault {
         fs::create_dir_all(&data_dir).context("无法创建保险库目录")?;
         let bootstrap = OpenOptions::new()
             .create(true)
+            .truncate(false)
             .read(true)
             .write(true)
             .open(data_dir.join("bootstrap.lock"))
@@ -98,7 +100,7 @@ impl Vault {
             serde_json::from_slice(&bytes).context("保险库文件格式无效")?;
         if document.version != 7 {
             bail!(
-                "KRU 0.13 仅支持模块化 v7 保险库；当前文件版本为 {}",
+                "KRU 0.14 仅支持模块化 v7 保险库；当前文件版本为 {}",
                 document.version
             );
         }
@@ -175,14 +177,13 @@ impl Vault {
         id: Option<Uuid>,
         mut input: ConnectionInput,
     ) -> Result<OwnerEditorDraft> {
-        input.id = None;
-        input.name = clean_text(&input.name, 80);
-        input.description = clean_text(&input.description, 240);
+        input.name = checked_text(&input.name, "项目名称", 80)?;
+        input.description = checked_text(&input.description, "项目说明", 240)?;
         let id = id.unwrap_or_else(Uuid::new_v4);
         let updated_at = Utc::now().to_rfc3339();
         let payload = self.inner.key.encrypt(&input)?;
         self.update_document(|document| {
-            document.editor_drafts.clear();
+            document.editor_drafts.retain(|draft| draft.id != id);
             document.editor_drafts.push(StoredEditorDraft {
                 id,
                 updated_at: updated_at.clone(),
@@ -338,7 +339,10 @@ impl Vault {
         if !connection.stored.enabled {
             bail!("该项目已禁用");
         }
-        let field = clean_text(field, 80);
+        // Module names are length-checked when saved. Do not truncate a caller's
+        // lookup here: a longer, different name must never alias an existing
+        // credential and fill the wrong value.
+        let field = field.trim().to_owned();
         let metadata = connection
             .secrets
             .available_fields(connection.stored.secret.as_ref())
@@ -351,76 +355,6 @@ impl Vault {
             .context("该秘密字段尚未配置")?
             .to_owned();
         Ok((connection.stored.name, metadata.kind, value))
-    }
-
-    pub fn verify_or_pin_ssh_fingerprint(
-        &self,
-        id: Uuid,
-        fingerprint: &str,
-        may_pin: bool,
-    ) -> Result<String> {
-        let actual = normalize_ssh_fingerprint(fingerprint)?;
-        self.with_exclusive_lock(|_| {
-            let mut document = self.read_document_unlocked()?;
-            let connection = document
-                .connections
-                .iter_mut()
-                .find(|connection| connection.id == id)
-                .context("找不到该连接")?;
-            if !connection.has_capability("ssh") {
-                bail!("所选项目的模块尚未形成可用 SSH 动作");
-            }
-            let trust_matches_endpoint = connection
-                .host_fingerprint_host
-                .eq_ignore_ascii_case(&connection.host)
-                && connection.host_fingerprint_port == connection.port;
-            if !trust_matches_endpoint {
-                connection.host_fingerprint.clear();
-                connection.host_fingerprint_host.clear();
-                connection.host_fingerprint_port = 0;
-            }
-            let current = connection.host_fingerprint.trim();
-            if current.is_empty() {
-                if !may_pin {
-                    bail!("SSH 主机信任在连接期间已被重置，请重新连接");
-                }
-                connection.host_fingerprint = actual.clone();
-                connection.host_fingerprint_host = connection.host.clone();
-                connection.host_fingerprint_port = connection.port;
-                connection.updated_at = Utc::now().to_rfc3339();
-                self.write_document_unlocked(&document)?;
-                return Ok(actual.clone());
-            }
-            if normalize_ssh_fingerprint(current)? != actual {
-                bail!("SSH 主机信任在连接期间发生变化，已取消命令");
-            }
-            Ok(actual.clone())
-        })
-    }
-
-    pub fn reset_ssh_fingerprint(&self, id: Uuid) -> Result<()> {
-        self.with_exclusive_lock(|_| {
-            let mut document = self.read_document_unlocked()?;
-            let connection = document
-                .connections
-                .iter_mut()
-                .find(|connection| connection.id == id)
-                .context("找不到该连接")?;
-            if !connection.has_capability("ssh") {
-                bail!("所选项目的模块尚未形成可用 SSH 动作");
-            }
-            if !connection.host_fingerprint.is_empty()
-                || !connection.host_fingerprint_host.is_empty()
-                || connection.host_fingerprint_port != 0
-            {
-                connection.host_fingerprint.clear();
-                connection.host_fingerprint_host.clear();
-                connection.host_fingerprint_port = 0;
-                connection.updated_at = Utc::now().to_rfc3339();
-                self.write_document_unlocked(&document)?;
-            }
-            Ok(())
-        })
     }
 
     pub fn save_connection(&self, mut input: ConnectionInput) -> Result<PublicConnection> {
@@ -456,13 +390,6 @@ impl Vault {
                         input.remove_secret_names.push(removed.to_owned());
                     }
                 }
-                if input
-                    .modules
-                    .iter()
-                    .any(|module| module.kind == "apiCredential")
-                {
-                    input.http_auth_type = "auto".to_owned();
-                }
             }
             merge_secret_bundle(&mut secrets, &input.secrets);
             for name in &input.remove_secret_names {
@@ -485,7 +412,7 @@ impl Vault {
                 }
             }
 
-            input.name = clean_text(&input.name, 80);
+            input.name = checked_text(&input.name, "项目名称", 80)?;
             if input.name.is_empty() {
                 bail!("项目名称不能为空");
             }
@@ -816,6 +743,7 @@ impl Vault {
     fn open_lock(&self) -> Result<File> {
         OpenOptions::new()
             .create(true)
+            .truncate(false)
             .read(true)
             .write(true)
             .open(&self.inner.lock_path)
@@ -840,7 +768,7 @@ fn normalize_modules(modules: Vec<ItemModule>) -> Result<Vec<ItemModule>> {
     let mut singleton_kinds = Vec::new();
     let mut secret_names = Vec::new();
     for mut module in modules {
-        module.kind = clean_text(&module.kind, 40);
+        module.kind = module.kind.trim().to_owned();
         if !matches!(
             module.kind.as_str(),
             "username"
@@ -869,7 +797,7 @@ fn normalize_modules(modules: Vec<ItemModule>) -> Result<Vec<ItemModule>> {
             module.name = name.to_owned();
             module.value.clear();
         } else if module.kind == "customSecret" {
-            module.name = clean_text(&module.name, 80);
+            module.name = checked_text(&module.name, "自定义秘密字段名称", 80)?;
             if !valid_identifier(&module.name)
                 || canonical_secret_module_name(&module.name).is_some()
                 || matches!(module.name.as_str(), "token" | "apiKey" | "api_key")
@@ -879,7 +807,7 @@ fn normalize_modules(modules: Vec<ItemModule>) -> Result<Vec<ItemModule>> {
             module.value.clear();
         } else {
             module.name.clear();
-            module.value = clean_text(&module.value, if module.kind == "url" { 500 } else { 255 });
+            module.value = module.value.trim().to_owned();
             if module.kind == "port" && !module.value.is_empty() {
                 let port = module.value.parse::<u16>().context("端口必须是 1–65535")?;
                 if port == 0 {
@@ -1074,39 +1002,7 @@ fn normalize_connection_v7(
     let http_auth_type = input.http_auth_type.clone();
     let capabilities =
         derive_capabilities(&modules, secrets, &http_auth_type, &input.api_auth_headers);
-    let (host_fingerprint, host_fingerprint_host, host_fingerprint_port) = match existing {
-        Some(connection)
-            if !host.is_empty()
-                && connection.host.eq_ignore_ascii_case(&host)
-                && connection.port == port
-                && connection.host_fingerprint_host.eq_ignore_ascii_case(&host)
-                && connection.host_fingerprint_port == port =>
-        {
-            (
-                connection.host_fingerprint.clone(),
-                connection.host_fingerprint_host.clone(),
-                connection.host_fingerprint_port,
-            )
-        }
-        _ => (String::new(), String::new(), 0),
-    };
-    let allowed_methods = if input.allowed_methods.is_empty() {
-        ["GET", "POST", "PUT", "PATCH", "DELETE", "HEAD"]
-            .into_iter()
-            .map(str::to_owned)
-            .collect()
-    } else {
-        normalize_list(input.allowed_methods, 10, 10)
-            .into_iter()
-            .map(|method| method.to_uppercase())
-            .filter(|method| {
-                matches!(
-                    method.as_str(),
-                    "GET" | "POST" | "PUT" | "PATCH" | "DELETE" | "HEAD"
-                )
-            })
-            .collect()
-    };
+    let allowed_methods = normalize_http_methods(input.allowed_methods)?;
     let name = fallback_item_name(&input.name, id, &modules, secrets);
     Ok(StoredConnection {
         id,
@@ -1117,7 +1013,7 @@ fn normalize_connection_v7(
         enabled: input.enabled,
         created_at,
         updated_at: now,
-        description: clean_text(&input.description, 240),
+        description: checked_text(&input.description, "项目说明", 240)?,
         host,
         port,
         username: String::new(),
@@ -1129,17 +1025,17 @@ fn normalize_connection_v7(
         } else {
             String::new()
         },
-        host_fingerprint,
-        host_fingerprint_host,
-        host_fingerprint_port,
+        host_fingerprint: String::new(),
+        host_fingerprint_host: String::new(),
+        host_fingerprint_port: 0,
         base_url,
-        auth_header: clean_text(&input.auth_header, 100),
-        auth_location: clean_text(&input.auth_location, 20),
-        auth_prefix: clean_text(&input.auth_prefix, 32),
+        auth_header: input.auth_header.trim().to_owned(),
+        auth_location: input.auth_location.trim().to_owned(),
+        auth_prefix: input.auth_prefix.trim().to_owned(),
         api_auth_headers: input.api_auth_headers,
         allowed_methods,
-        allowed_path_prefixes: normalize_list(input.allowed_path_prefixes, 30, 180),
-        test_path: clean_text(&input.test_path, 500),
+        allowed_path_prefixes: normalize_trimmed_list(input.allowed_path_prefixes),
+        test_path: input.test_path.trim().to_owned(),
         cli: None,
         browser: None,
         credential: None,
@@ -1181,16 +1077,6 @@ fn stored_from_portable(
         portable.updated_at.clone(),
     )?;
     stored.created_at = portable.created_at.clone();
-    if !portable.host_fingerprint.is_empty()
-        && portable
-            .host_fingerprint_host
-            .eq_ignore_ascii_case(&stored.host)
-        && portable.host_fingerprint_port == stored.port
-    {
-        stored.host_fingerprint = portable.host_fingerprint.clone();
-        stored.host_fingerprint_host = portable.host_fingerprint_host.clone();
-        stored.host_fingerprint_port = portable.host_fingerprint_port;
-    }
     stored.encrypted_secrets = key.encrypt(&secrets)?;
     Ok(stored)
 }
@@ -1229,7 +1115,7 @@ fn split_numbered_import_name(name: &str) -> Option<(&str, usize)> {
     let without_closing = name.strip_suffix(')')?;
     let opening = without_closing.rfind('(')?;
     let index = without_closing[opening + 1..].parse::<usize>().ok()?;
-    (index >= 2 && index < usize::MAX && opening > 0)
+    ((2..usize::MAX).contains(&index) && opening > 0)
         .then_some((&without_closing[..opening], index))
 }
 
@@ -1325,7 +1211,7 @@ fn prepare_auto_api(input: &mut ConnectionInput, secrets: &mut SecretBundle) -> 
     input.auth_location = profile.auth_location.to_owned();
     input.auth_prefix = profile.auth_prefix.to_owned();
     input.api_auth_headers.clear();
-    input.allowed_methods = ["GET", "POST", "PUT", "PATCH", "DELETE", "HEAD"]
+    input.allowed_methods = ["GET", "POST", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS"]
         .into_iter()
         .map(str::to_owned)
         .collect();
@@ -1342,38 +1228,46 @@ fn valid_identifier(value: &str) -> bool {
         && chars.all(|character| character.is_ascii_alphanumeric() || character == '_')
 }
 
-fn normalize_list(values: Vec<String>, max_items: usize, max_len: usize) -> Vec<String> {
+fn normalize_http_methods(values: Vec<String>) -> Result<Vec<String>> {
     let mut output = Vec::new();
     for value in values {
-        let value = clean_text(&value, max_len);
+        let value = value.trim().to_ascii_uppercase();
+        if value.is_empty() || output.contains(&value) {
+            continue;
+        }
+        Method::from_bytes(value.as_bytes()).with_context(|| format!("HTTP 方法无效：{value}"))?;
+        output.push(value);
+    }
+    if output.is_empty() {
+        output = ["GET", "POST", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS"]
+            .into_iter()
+            .map(str::to_owned)
+            .collect();
+    }
+    Ok(output)
+}
+
+fn normalize_trimmed_list(values: Vec<String>) -> Vec<String> {
+    let mut output = Vec::new();
+    for value in values {
+        let value = value.trim().to_owned();
         if !value.is_empty() && !output.contains(&value) {
             output.push(value);
-        }
-        if output.len() == max_items {
-            break;
         }
     }
     output
 }
 
-fn clean_text(value: &str, max_chars: usize) -> String {
-    value.trim().chars().take(max_chars).collect()
+fn checked_text(value: &str, label: &str, max_chars: usize) -> Result<String> {
+    let value = value.trim();
+    if value.chars().count() > max_chars {
+        bail!("{label}不能超过 {max_chars} 个字符");
+    }
+    Ok(value.to_owned())
 }
 
-fn normalize_ssh_fingerprint(value: &str) -> Result<String> {
-    let value = value.trim();
-    if value.is_empty() {
-        bail!("SSH 主机指纹不能为空");
-    }
-    let normalized = if value.starts_with("SHA256:") {
-        value.to_owned()
-    } else {
-        format!("SHA256:{value}")
-    };
-    if normalized.chars().count() > 200 {
-        bail!("SSH 主机指纹无效");
-    }
-    Ok(normalized)
+fn clean_text(value: &str, max_chars: usize) -> String {
+    value.trim().chars().take(max_chars).collect()
 }
 
 fn random_token() -> Result<String> {
@@ -1569,16 +1463,28 @@ mod tests {
             Some("unfinished-draft-secret-7129")
         );
 
-        let mut replacement = ssh_input(None);
+        let existing_item_id = Uuid::new_v4();
+        let mut replacement = ssh_input(Some(existing_item_id));
         replacement.name = "replacement-draft".to_owned();
         let replacement = vault.save_editor_draft(None, replacement).unwrap();
         let drafts = vault.list_editor_drafts().unwrap();
-        assert_eq!(drafts.len(), 1);
-        assert_eq!(drafts[0].id, replacement.id);
+        assert_eq!(drafts.len(), 2);
+        assert!(drafts.iter().any(|draft| draft.id == replacement.id));
+        assert_eq!(
+            drafts
+                .iter()
+                .find(|draft| draft.id == replacement.id)
+                .unwrap()
+                .input
+                .id,
+            Some(existing_item_id)
+        );
         assert_ne!(replacement.id, saved.id);
 
         vault.delete_editor_draft(replacement.id).unwrap();
-        assert!(vault.list_editor_drafts().unwrap().is_empty());
+        let drafts = vault.list_editor_drafts().unwrap();
+        assert_eq!(drafts.len(), 1);
+        assert_eq!(drafts[0].id, saved.id);
     }
 
     #[test]
@@ -1603,6 +1509,61 @@ mod tests {
             .value = "api.example.test/v1".to_owned();
         let normalized = vault.save_connection(input).unwrap();
         assert_eq!(normalized.base_url, "https://api.example.test/v1");
+    }
+
+    #[test]
+    fn explicit_api_transport_settings_survive_editor_saves() {
+        let directory = tempdir().unwrap();
+        let vault = Vault::open(directory.path().join("vault")).unwrap();
+        let mut input = api_input(None, "Configured API", "configured-api-secret");
+        input.auth_prefix = "Token".to_owned();
+        input.allowed_methods.push("PROPFIND".to_owned());
+        let saved = vault.save_connection(input).unwrap();
+
+        assert_eq!(saved.http_auth_type, "bearer");
+        assert_eq!(saved.auth_header, "X-API-Key");
+        assert_eq!(saved.auth_prefix, "Token");
+        assert_eq!(saved.allowed_methods, vec!["GET", "PROPFIND"]);
+        assert_eq!(saved.allowed_path_prefixes, vec!["/v1/"]);
+        assert_eq!(saved.test_path, "/health");
+    }
+
+    #[test]
+    fn operational_api_values_are_preserved_instead_of_silently_truncated() {
+        let directory = tempdir().unwrap();
+        let vault = Vault::open(directory.path().join("vault")).unwrap();
+        let long_url = format!("https://example.test/{}", "route/".repeat(120));
+        let long_prefix = format!("/{}", "scope/".repeat(80));
+        let long_test_path = format!("/{}", "health/".repeat(80));
+        let long_auth_prefix = "CustomAuthorizationPrefix".repeat(4);
+        let mut input = api_input(None, "Long API configuration", "long-api-secret");
+        input
+            .modules
+            .iter_mut()
+            .find(|module| module.kind == "url")
+            .unwrap()
+            .value = long_url.clone();
+        input.allowed_methods = vec!["get".to_owned(), "PROPFIND".to_owned()];
+        input.allowed_path_prefixes = vec![long_prefix.clone()];
+        input.test_path = long_test_path.clone();
+        input.auth_prefix = long_auth_prefix.clone();
+
+        let saved = vault.save_connection(input).unwrap();
+        assert_eq!(saved.base_url, long_url);
+        assert_eq!(saved.allowed_methods, vec!["GET", "PROPFIND"]);
+        assert_eq!(saved.allowed_path_prefixes, vec![long_prefix]);
+        assert_eq!(saved.test_path, long_test_path);
+        assert_eq!(saved.auth_prefix, long_auth_prefix);
+
+        let mut invalid = api_input(None, "Invalid method", "invalid-method-secret");
+        invalid.allowed_methods = vec!["NOT VALID".to_owned()];
+        assert!(
+            vault
+                .save_connection(invalid)
+                .unwrap_err()
+                .to_string()
+                .contains("HTTP 方法无效")
+        );
     }
 
     #[test]
@@ -1902,73 +1863,6 @@ mod tests {
     }
 
     #[test]
-    fn ssh_fingerprint_tracks_the_same_endpoint_and_clears_after_endpoint_change() {
-        let directory = tempdir().unwrap();
-        let vault = Vault::open(directory.path().join("vault")).unwrap();
-        let saved = vault.save_connection(ssh_input(None)).unwrap();
-        assert!(
-            vault
-                .get_connection(saved.id)
-                .unwrap()
-                .stored
-                .host_fingerprint
-                .is_empty()
-        );
-
-        let pinned = vault
-            .verify_or_pin_ssh_fingerprint(saved.id, "first-key", true)
-            .unwrap();
-        assert_eq!(pinned, "SHA256:first-key");
-        let trusted = vault.get_connection(saved.id).unwrap().stored;
-        assert_eq!(trusted.host_fingerprint, "SHA256:first-key");
-        assert_eq!(trusted.host_fingerprint_host, "127.0.0.1");
-        assert_eq!(trusted.host_fingerprint_port, 22);
-        assert!(
-            vault
-                .verify_or_pin_ssh_fingerprint(saved.id, "second-key", true)
-                .is_err()
-        );
-
-        vault.save_connection(ssh_input(Some(saved.id))).unwrap();
-        assert_eq!(
-            vault
-                .get_connection(saved.id)
-                .unwrap()
-                .stored
-                .host_fingerprint,
-            "SHA256:first-key"
-        );
-
-        let mut moved = ssh_input(Some(saved.id));
-        moved
-            .modules
-            .iter_mut()
-            .find(|module| module.kind == "host")
-            .unwrap()
-            .value = "new-host.example.test".to_owned();
-        vault.save_connection(moved).unwrap();
-        assert!(
-            vault
-                .get_connection(saved.id)
-                .unwrap()
-                .stored
-                .host_fingerprint
-                .is_empty()
-        );
-
-        vault.reset_ssh_fingerprint(saved.id).unwrap();
-        let reset = vault.get_connection(saved.id).unwrap().stored;
-        assert!(reset.host_fingerprint.is_empty());
-        assert!(reset.host_fingerprint_host.is_empty());
-        assert_eq!(reset.host_fingerprint_port, 0);
-        assert!(
-            vault
-                .verify_or_pin_ssh_fingerprint(saved.id, "first-key", false)
-                .is_err()
-        );
-    }
-
-    #[test]
     fn imported_private_key_survives_source_file_removal() {
         let directory = tempdir().unwrap();
         let vault_dir = directory.path().join("vault");
@@ -2106,6 +2000,35 @@ mod tests {
                 .named_secrets
                 .get("password")
                 .is_none()
+        );
+    }
+
+    #[test]
+    fn secret_lookup_never_aliases_a_longer_module_name() {
+        let directory = tempdir().unwrap();
+        let vault = Vault::open(directory.path().join("vault")).unwrap();
+        let module_name = format!("a{}", "x".repeat(79));
+        let mut input = api_input(None, "Exact module lookup", "api-secret");
+        input.modules.push(ItemModule {
+            kind: "customSecret".into(),
+            name: module_name.clone(),
+            agent_visible: Some(false),
+            ..Default::default()
+        });
+        input
+            .secrets
+            .named_secrets
+            .insert(module_name.clone(), "exact-secret".into());
+        let saved = vault.save_connection(input).unwrap();
+
+        assert_eq!(
+            vault.get_secret_value(saved.id, &module_name).unwrap().2,
+            "exact-secret"
+        );
+        assert!(
+            vault
+                .get_secret_value(saved.id, &format!("{module_name}x"))
+                .is_err()
         );
     }
 }

@@ -72,10 +72,11 @@ KRU 注册的是本地 `stdio` MCP。Agent 调用时才会启动对应 MCP 进�
 | --- | --- | --- |
 | **填写** | 项目包含任意凭据模块 | 把选定值写入已聚焦的浏览器、桌面控件或托管终端 |
 | **SSH** | 主机 + 端口 + 账号 + 密码/私钥 | 在本地认证，并执行 Agent 为当前任务提交的命令 |
+| **文件传输** | 与 SSH 相同的模块组合 | 通过 SFTP 直接上传或下载，并自动创建目标父目录 |
 | **HTTP** | 项目包含 API 凭据 | 注入认证信息并发送受约束的请求 |
 | **终端** | Agent 打开 KRU 托管终端 | 写入选定秘密，但不把秘密返回给 Agent |
 
-同一项目可以开放多个动作。KRU 没有观察、诊断、受限或执行模式：项目开放 `ssh_execute` 后，Agent 直接提交任务真正需要的命令。
+同一项目可以开放多个动作。KRU 没有观察、诊断、受限或执行模式：项目开放 `ssh_run` 后，Agent 直接提交任务真正需要的命令。
 
 ## 每个模块独立控制明文
 
@@ -99,15 +100,15 @@ KRU 注册的是本地 `stdio` MCP。Agent 调用时才会启动对应 MCP 进�
 
 ### 浏览器填写
 
-可靠的无人值守浏览器填写使用随包提供的 Chromium 扩展。KRU 只把一个选定字段写入当前聚焦控件；不分析页面、不选择字段、不点击提交，也不导出 Cookie。Chrome、Edge 和 Brave 首次使用时需要手动加载一次扩展。
+可靠的无人值守浏览器填写使用随包提供的 Chromium 扩展。KRU 只把一个选定字段写入当前聚焦控件；Agent 明确设置 `submit=true` 时，可在同一次调用中提交该字段所属表单。KRU 不分析页面、不选择字段，也不导出 Cookie。Chrome、Edge 和 Brave 首次使用时需要手动加载一次扩展。
 
 ### SSH
 
-KRU 支持密码与私钥认证。首次连接会记录服务器指纹；服务器身份变化后必须由用户明确重置。认证明文不会返回给 Agent。
+KRU 支持密码与私钥认证、长命令和 SFTP 文件上传/下载。目标父目录会自动创建，已有目标默认通过临时文件安全替换。KRU 连接用户保存的主机与端口，但不固定或比较 SSH 服务器指纹。认证明文不会返回给 Agent。
 
 ### HTTP API
 
-KRU 会识别常见 API 服务，无法识别时使用 Bearer Token。保存服务 URL 后，请求会被限制在同一 Origin；没有保存 URL 时，Agent 必须提供绝对 HTTPS URL，HTTP 只允许本机回环地址。
+KRU 会识别常见 API 服务，无法识别时使用 Bearer Token。保存服务 URL 后，请求会被限制在同一 Origin，Agent 可以省略 URL 或只提供相对路径；没有保存 URL 时，Agent 必须提供绝对 HTTPS URL，HTTP 只允许本机回环地址。同源重定向会正常跟随；大型响应可以直接流式保存到本地文件，并支持 JSON、文本、表单、原始 Base64 和 multipart 文件正文。
 
 ## 本地程序设置
 
@@ -148,17 +149,21 @@ KRU 会识别常见 API 服务，无法识别时使用 Bearer Token。保存服�
   <p><a href="https://www.youtube.com/watch?v=GKQLEgAdbTU">在 YouTube 观看 KRU 演示 →</a></p>
 </details>
 
-## MCP 接口
+## MCP 0.14 接口
 
-```text
-vault_items_list
-secret_fill
-ssh_execute
-api_request
-terminal_open · terminal_input · terminal_read · terminal_close
-```
+每个 Agent 会话拥有自己的 stdio MCP 进程。启动新版 KRU 或另一个 Agent 会话不会中断已经进行中的任务；只有客户端结束会话，或用户从 KRU 托盘明确选择退出时，相关 MCP 进程才会结束。
 
-KRU 不提供不受限制的 `get_secret`。`vault_items_list` 只返回项目与模块元数据、非秘密目标信息和自动推导的动作。只有用户明确打开 Agent 可见开关的凭据值才会出现在返回中。
+| Tool | 用途 |
+| --- | --- |
+| `items_search(query?)` | 查找可用项目、模块和自动开放的动作 |
+| `credential_fill` | 在浏览器、桌面焦点或托管终端中使用一个模块，可选择同时提交 |
+| `ssh_run` | 使用已保存的 SSH 身份执行命令 |
+| `ssh_upload` | 使用已保存的 SSH 身份上传本地文件 |
+| `ssh_download` | 使用已保存的 SSH 身份下载远端文件 |
+| `http_send` | 注入本地凭据并发送 HTTP 请求或传输文件 |
+| `terminal_start` / `terminal_write` / `terminal_read` / `terminal_stop` | 操作 KRU 托管的本地终端 |
+
+KRU 不提供不受限制的 `get_secret`。`items_search` 只返回项目与模块元数据、非秘密目标信息和自动推导的动作。只有用户明确打开 Agent 可见开关的凭据值才会出现在返回中；未知参数和已停用的旧工具名会被拒绝。
 
 手动配置 `stdio`：
 

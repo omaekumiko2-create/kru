@@ -9,6 +9,7 @@ use crate::{
         AppState, ConnectionInput, ImportSummary, NewActivity, OwnerEditorDraft, OwnerLockState,
         OwnerSecretView, PublicConnection, SettingsPatch,
     },
+    storage::app_data_dir,
     vault::Vault,
 };
 use anyhow::{Context, Result};
@@ -325,32 +326,6 @@ async fn test_connection(
     });
     emit_changed(&app);
     result.map_err(command_error)
-}
-
-#[tauri::command]
-async fn reset_ssh_fingerprint(
-    app: AppHandle,
-    runtime: State<'_, AppRuntime>,
-    id: Uuid,
-) -> Result<(), String> {
-    let connection = runtime.vault.get_connection(id).map_err(command_error)?;
-    if !connection.stored.has_capability("ssh") {
-        return Err("所选项目的模块尚未形成可用 SSH 动作".to_owned());
-    }
-    runtime
-        .vault
-        .reset_ssh_fingerprint(id)
-        .map_err(command_error)?;
-    let _ = runtime.vault.add_activity(NewActivity {
-        status: "success".to_owned(),
-        source: "应用".to_owned(),
-        connection_name: connection.stored.name,
-        action: "重置 SSH 主机信任".to_owned(),
-        duration_ms: 0,
-        error: String::new(),
-    });
-    emit_changed(&app);
-    Ok(())
 }
 
 #[tauri::command]
@@ -778,12 +753,6 @@ fn install_tray(app: &tauri::App) -> Result<()> {
     Ok(())
 }
 
-fn app_data_dir() -> Result<PathBuf> {
-    dirs::data_dir()
-        .map(|path| path.join("mcp-vault").join("v2"))
-        .context("无法确定本机数据目录")
-}
-
 #[cfg(windows)]
 fn request_square_corners(window: &WebviewWindow) -> Result<()> {
     use windows::Win32::Graphics::Dwm::{
@@ -821,7 +790,6 @@ pub fn run_gui() -> Result<()> {
             gui_instance.listen_for_takeover(move || exit_handle.exit(0))?;
             let vault = Vault::open(data_dir.clone())?;
             let executable = mcp::launcher_executable()?.to_string_lossy().into_owned();
-            crate::runtime_epoch::activate_build(&data_dir, PathBuf::from(&executable).as_path())?;
             let browser = BrowserBridge::new(vault.clone());
             let agent_registry = AgentRegistry::new(PathBuf::from(&executable))?;
             app.manage(AppRuntime {
@@ -916,7 +884,6 @@ pub fn run_gui() -> Result<()> {
             set_connection_enabled,
             delete_connection,
             test_connection,
-            reset_ssh_fingerprint,
             update_settings,
             system_integration_status,
             set_desktop_shortcut,

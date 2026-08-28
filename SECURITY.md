@@ -6,9 +6,9 @@ KRU is a local credential execution tool exposed through stdio MCP. Its primary 
 
 - Vault secrets are encrypted at rest with authenticated encryption.
 - Modules that are not marked `agentVisible` do not return plaintext through `items_search`.
-- Hidden values can be used locally by `credential_fill`, `ssh_run`, and `http_send`.
+- Hidden values can be used locally by `credential_fill`, `ssh_run`, `ssh_upload`, `ssh_download`, and `http_send`.
 - Known stored credentials are redacted from activity errors, terminal output, SSH output, and API responses where KRU can identify them.
-- API redirects and caller-supplied authentication, cookie, proxy-authentication, and host headers are blocked.
+- Saved API targets stay on their stored Origin; same-origin redirects are allowed, and KRU-controlled authentication headers cannot be replaced by the caller.
 
 ## Explicitly agent-visible values
 
@@ -33,21 +33,23 @@ MCP tool annotations are descriptive hints. KRU enforces its actual restrictions
 
 ### Browser and desktop fill
 
-`credential_fill` writes one value and never submits it. The paired browser extension writes only to the currently focused control. Desktop fill depends on the real operating-system foreground focus; background DOM focus is not sufficient. KRU cannot prove that the focused destination is trustworthy.
+`credential_fill` writes one value to the currently focused control. When the caller sets `submit=true`, KRU also submits the focused browser form or presses Enter in a desktop or managed-terminal target. Desktop fill depends on the real operating-system foreground focus; background DOM focus is not sufficient. KRU cannot prove that the focused destination is trustworthy.
 
 ### Managed terminal
 
-KRU starts the requested program directly and does not insert a shell. Ordinary terminal input can still execute commands in an interactive program and may affect local or external systems. Redaction covers values filled by KRU and common encodings of those values, not every secret a process may print.
+KRU starts the requested program or native Windows script and does not add a policy shell. The child inherits KRU's normal user environment so installed tools behave as they do for the user. Ordinary terminal input can execute commands in an interactive program and may affect local or external systems. Redaction covers values filled by KRU and common encodings of those values, not environment variables or every secret a process may print.
 
 ### SSH
 
-An item advertising `ssh_run` grants the Agent full command execution through that stored SSH identity. KRU has no observation, diagnostic, restricted, or execution mode. Host fingerprints are bound to their host and port, but users must still review unexpected host-key changes.
+An item advertising SSH actions grants the Agent full command execution and SFTP file-transfer access through that stored SSH identity. Upload and download paths are selected by the Agent for the user's task, and existing destination files are replaced by default. KRU has no observation, diagnostic, restricted, or execution mode. It does not pin or compare SSH host fingerprints; the stored host and port are the destination selected by the user.
 
 ### API requests
 
-When an item stores a service URL, KRU restricts requests to the same Origin and applies its configured method and path rules. When no service URL is stored, the Agent may supply any absolute HTTPS URL; HTTP is allowed only for loopback addresses. This means an addressless API item permits the Agent to choose which HTTPS service receives the hidden credential. Store a service URL when the credential must be bound to one Origin.
+When an item stores a service URL, KRU restricts requests to the same Origin; the caller can omit the URL, use a relative path, and choose the method needed for the task. When no service URL is stored, the Agent may supply any absolute HTTPS URL; HTTP is allowed only for loopback addresses. This means an addressless API item permits the Agent to choose which HTTPS service receives the hidden credential. Store a service URL when the credential must be bound to one Origin.
 
-KRU disables redirects and ignores caller-supplied sensitive authentication headers. Activity records include the HTTP method, Origin, and path without the query string. Known stored secrets are redacted before the activity is saved.
+KRU follows redirects only while they stay on the same permitted Origin. The configured authentication header or query parameter is injected last and replaces a caller value with the same name. Set-Cookie is excluded from returned response headers, but ordinary request and response headers are preserved. Activity records include the HTTP method, Origin, and path without the query string. Known stored secrets are redacted before the activity is saved.
+
+`http_send` can upload local files or save a response to a local file when the caller supplies a path. The saved Origin restriction still applies, but KRU does not independently decide whether a user-requested local file is appropriate to send or where an explicitly requested response should be stored. Existing response files are replaced by default; the caller can explicitly disable replacement.
 
 ## Local data and backups
 

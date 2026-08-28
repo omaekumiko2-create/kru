@@ -72,6 +72,7 @@ KRU registers a local `stdio` MCP command. The MCP process starts on demand when
 | --- | --- | --- |
 | **Fill** | The item contains a credential module | KRU writes the selected value into a focused browser, desktop control, or managed terminal |
 | **SSH** | Host + port + username + password/private key | KRU authenticates locally and runs the command requested by the agent |
+| **File transfer** | The item has the same SSH module combination | KRU uploads or downloads directly over SFTP and creates destination parent directories |
 | **HTTP** | The item contains an API credential | KRU injects authentication and sends the constrained request |
 | **Terminal** | The agent opens a managed terminal | KRU can write a selected secret without returning it to the agent |
 
@@ -101,15 +102,15 @@ The eye and copy controls in the editor are for the local owner. The optional si
 
 ### Browser filling
 
-Reliable unattended browser filling uses the bundled Chromium extension. KRU writes one selected field into the currently focused control; it does not inspect the page, choose a field, click submit, or export cookies. Chrome, Edge, and Brave require one manual extension load on first use.
+Reliable unattended browser filling uses the bundled Chromium extension. KRU writes one selected field into the currently focused control; when the agent explicitly sets `submit=true`, it can submit that field's form in the same call. It does not inspect the page, choose a field, or export cookies. Chrome, Edge, and Brave require one manual extension load on first use.
 
 ### SSH
 
-KRU supports password and private-key authentication. The server fingerprint is recorded on first connection and must be explicitly reset if the host identity changes. Authentication plaintext is not returned to the agent.
+KRU supports password and private-key authentication, long commands, and direct SFTP upload/download. Destination parent directories are created automatically and existing targets are replaced by default through a temporary-file write. KRU connects to the host and port saved by the user; it does not pin or compare SSH host fingerprints. Authentication plaintext is not returned to the agent.
 
 ### HTTP APIs
 
-KRU recognizes common API providers and falls back to Bearer Token when no provider matches. A saved service URL locks requests to the same origin. Without one, the agent must provide an absolute HTTPS URL; plain HTTP is allowed only for loopback addresses.
+KRU recognizes common API providers and falls back to Bearer Token when no provider matches. A saved service URL locks requests to the same Origin and lets the agent omit the URL or supply a relative path. Without one, the agent must provide an absolute HTTPS URL; plain HTTP is allowed only for loopback addresses. Same-origin redirects are followed, large responses can stream directly to a local file, and JSON, text, forms, raw Base64, and multipart file bodies are supported.
 
 ## Local app controls
 
@@ -152,14 +153,18 @@ Exported `.mvault` packages are encrypted and portable, but they contain their o
 
 ## MCP surface
 
-KRU 0.13 exposes one strict MCP surface: discover credentials with `items_search`, pass the known item name as `query`, and call only an action advertised by that item. Hidden plaintext must never be requested from the user, and KRU has no invented observation, diagnostic, or execution modes. Unknown fields and retired tool names are rejected.
+KRU 0.14 exposes one strict MCP surface: discover credentials with `items_search`, pass the known item name as `query`, and call only an action advertised by that item. Hidden plaintext must never be requested from the user, and KRU has no invented observation, diagnostic, or execution modes. Unknown fields and retired tool names are rejected.
+
+Each agent session owns its stdio MCP process. Starting a newer KRU build or another agent session does not interrupt work already in progress; sessions end when their client disconnects or the user explicitly quits KRU from the tray.
 
 | Tool | Purpose | MCP impact hint |
 | --- | --- | --- |
 | `items_search(query?)` | Find usable items, modules, and advertised actions | Read-only, idempotent, local |
-| `credential_fill` | Write one saved module into an approved local target | Changes local state |
+| `credential_fill` | Use one saved module in an approved local target, optionally submitting it | Changes local state; submission can have external effects |
 | `ssh_run` | Run the requested command through a stored SSH identity | External effects possible |
-| `http_send` | Send an authenticated, policy-checked HTTP request to one absolute URL | External effects possible |
+| `ssh_upload` | Upload a local file through a stored SSH identity | Reads a local file and changes the remote target |
+| `ssh_download` | Download a remote file through a stored SSH identity | Reads a remote file and changes the local target |
+| `http_send` | Send an authenticated HTTP request, optionally transferring local files | External and local-file effects possible |
 | `terminal_start` | Start a managed local process | Changes local state |
 | `terminal_write` | Write ordinary input into a managed terminal | External effects possible |
 | `terminal_read` | Read redacted managed-terminal output | Read-only, idempotent, local |

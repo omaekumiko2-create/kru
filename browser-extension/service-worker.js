@@ -174,7 +174,7 @@ async function connectOnce(force = false) {
       const expiresAt = jobExpiresAt(message.job);
       const result = Number.isFinite(expiresAt) && Date.now() >= expiresAt
         ? { ok: false, message: "填写任务已过期" }
-        : await fillFocused(message.job?.value, expiresAt);
+        : await fillFocused(message.job?.value, expiresAt, Boolean(message.job?.submit));
       if (ws.readyState === WebSocket.OPEN) {
         ws.send(JSON.stringify({
           type: "complete",
@@ -197,7 +197,7 @@ function jobExpiresAt(job, now = Date.now()) {
   return Number.isFinite(parsed) ? Math.min(parsed, latest) : latest;
 }
 
-async function fillFocused(value, expiresAt) {
+async function fillFocused(value, expiresAt, submit = false) {
   if (typeof value !== "string") return { ok: false, message: "填写内容无效" };
   const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
   if (!tab?.id) return { ok: false, message: "没有活动标签页" };
@@ -206,7 +206,7 @@ async function fillFocused(value, expiresAt) {
     const [execution] = await chrome.scripting.executeScript({
       target: { tabId: tab.id, frameIds: [frameId] },
       func: writeToFocusedControl,
-      args: [value, expiresAt],
+      args: [value, expiresAt, submit],
     });
     return execution?.result || { ok: false, message: "页面没有返回填写结果" };
   } catch {
@@ -214,7 +214,7 @@ async function fillFocused(value, expiresAt) {
   }
 }
 
-function writeToFocusedControl(value, expiresAt) {
+function writeToFocusedControl(value, expiresAt, submit = false) {
   if (Number.isFinite(expiresAt) && Date.now() >= expiresAt) {
     return { ok: false, message: "填写任务已过期" };
   }
@@ -249,6 +249,14 @@ function writeToFocusedControl(value, expiresAt) {
     }
     element.dispatchEvent(new InputEvent("input", { bubbles: true, inputType: "insertText" }));
     element.dispatchEvent(new Event("change", { bubbles: true }));
+    if (submit) {
+      const form = element.form || element.closest?.("form");
+      if (!form || typeof form.requestSubmit !== "function") {
+        return { ok: false, message: "已写入当前焦点控件，但找不到可提交的表单" };
+      }
+      setTimeout(() => form.requestSubmit(), 0);
+      return { ok: true, message: "已写入并提交当前表单" };
+    }
     return { ok: true, message: "已写入当前焦点控件" };
   } catch {
     return { ok: false, message: "页面拒绝写入当前控件" };

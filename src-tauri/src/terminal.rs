@@ -16,8 +16,8 @@ use std::{
 use uuid::Uuid;
 
 const MAX_SESSIONS: usize = 8;
-const MAX_OUTPUT: usize = 200_000;
-const MAX_INPUT: usize = 64_000;
+const MAX_OUTPUT: usize = 1_048_576;
+const MAX_INPUT: usize = 1_048_576;
 
 #[derive(Debug, Clone, Serialize, JsonSchema)]
 #[serde(rename_all = "camelCase")]
@@ -121,6 +121,12 @@ pub struct TerminalManager {
     sessions: Arc<Mutex<HashMap<Uuid, Arc<TerminalSession>>>>,
 }
 
+impl Default for TerminalManager {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl TerminalManager {
     pub fn new() -> Self {
         Self {
@@ -137,12 +143,8 @@ impl TerminalManager {
         if program.trim().is_empty() || program.chars().count() > 1_024 {
             bail!("程序名称无效");
         }
-        if args.len() > 100
-            || args
-                .iter()
-                .any(|arg| arg.chars().count() > 4_096 || arg.contains('\0'))
-        {
-            bail!("终端参数过多或过长");
+        if args.iter().any(|arg| arg.contains('\0')) {
+            bail!("终端参数不能包含空字符");
         }
         let cwd = normalize_cwd(cwd)?;
         let resolved = resolve_executable(program.trim(), cwd.as_deref())?;
@@ -172,21 +174,12 @@ impl TerminalManager {
         let mut command = CommandBuilder::new(&resolved.executable);
         command.args(resolved.prefix_args);
         command.args(args);
-        command.env_clear();
-        for name in safe_environment_names() {
-            #[cfg(windows)]
-            if name.eq_ignore_ascii_case("PSModulePath")
-                && is_windows_powershell(&resolved.executable)
-            {
-                // PowerShell 5.1 builds its own Windows module path when this
-                // variable is absent. Forwarding a path inherited from pwsh 7
-                // makes it load incompatible type data and breaks even built-in
-                // commands such as Get-ExecutionPolicy.
-                continue;
-            }
-            if let Some(value) = std::env::var_os(name) {
-                command.env(name, value);
-            }
+        #[cfg(windows)]
+        if is_windows_powershell(&resolved.executable) {
+            // PowerShell 5.1 builds its own Windows module path when this
+            // variable is absent. Inheriting a path from pwsh 7 makes it load
+            // incompatible type data and breaks built-in commands.
+            command.env_remove("PSModulePath");
         }
         #[cfg(not(windows))]
         command.env("TERM", "xterm-256color");
@@ -224,13 +217,11 @@ impl TerminalManager {
                             if buffer[..count]
                                 .windows(4)
                                 .any(|window| window == b"\x1b[6n")
+                                && let Ok(mut writer) = reader_writer.lock()
+                                && let Some(writer) = writer.as_mut()
                             {
-                                if let Ok(mut writer) = reader_writer.lock()
-                                    && let Some(writer) = writer.as_mut()
-                                {
-                                    let _ = writer.write_all(b"\x1b[1;1R");
-                                    let _ = writer.flush();
-                                }
+                                let _ = writer.write_all(b"\x1b[1;1R");
+                                let _ = writer.flush();
                             }
                             if let Ok(mut output) = reader_output.lock() {
                                 output.push(&buffer[..count]);
@@ -274,7 +265,7 @@ impl TerminalManager {
         writer.flush().context("无法刷新终端输入")
     }
 
-    pub fn fill_value(&self, session_id: Uuid, value: &str) -> Result<()> {
+    pub fn fill_value(&self, session_id: Uuid, value: &str, submit: bool) -> Result<()> {
         let session = self.session(session_id)?;
         if value.len() > MAX_INPUT || value.contains('\0') {
             bail!("秘密字段过长或包含空字符，无法写入终端");
@@ -290,6 +281,12 @@ impl TerminalManager {
         writer
             .write_all(value.as_bytes())
             .context("无法将凭据写入终端")?;
+        if submit {
+            #[cfg(windows)]
+            writer.write_all(b"\r\n").context("无法提交终端凭据")?;
+            #[cfg(not(windows))]
+            writer.write_all(b"\n").context("无法提交终端凭据")?;
+        }
         writer.flush().context("无法刷新终端凭据")
     }
 
@@ -435,13 +432,19 @@ fn resolve_executable(program: &str, cwd: Option<&Path>) -> Result<ResolvedExecu
     let candidate = std::fs::canonicalize(&candidate).unwrap_or(candidate);
     #[cfg(windows)]
     if let Some(extension) = candidate.extension().and_then(|value| value.to_str()) {
-        if extension.eq_ignore_ascii_case("cmd") {
-            return resolve_npm_cmd_shim(&candidate);
-        }
-        if extension.eq_ignore_ascii_case("bat") {
-            bail!(
-                "Windows .bat 不能安全地直接用于托管终端；请使用原生可执行文件或标准 npm .cmd 启动器"
-            );
+        if extension.eq_ignore_ascii_case("cmd") || extension.eq_ignore_ascii_case("bat") {
+            let command = find_native_windows_executable("cmd")
+                .context("找不到 cmd.exe，无法运行 Windows 脚本")?;
+            return Ok(ResolvedExecutable {
+                executable: windows_argument_path(&command),
+                prefix_args: vec![
+                    "/d".to_owned(),
+                    "/s".to_owned(),
+                    "/c".to_owned(),
+                    "call".to_owned(),
+                    windows_argument_path(&candidate),
+                ],
+            });
         }
     }
     #[cfg(windows)]
@@ -456,40 +459,6 @@ fn resolve_executable(program: &str, cwd: Option<&Path>) -> Result<ResolvedExecu
         // for CreateProcess while retaining the canonical path for checks.
         executable,
         prefix_args: Vec::new(),
-    })
-}
-
-#[cfg(windows)]
-fn resolve_npm_cmd_shim(shim: &Path) -> Result<ResolvedExecutable> {
-    let text = std::fs::read_to_string(shim).context("无法读取 Windows .cmd 启动器")?;
-    let pattern = regex::Regex::new(r#"(?i)%dp0%\\([^\"\r\n]+\.(?:c?js|mjs))"#)?;
-    let relative = pattern
-        .captures(&text)
-        .and_then(|captures| captures.get(1))
-        .map(|value| value.as_str().replace('\\', "/"))
-        .context(
-            "该 .cmd 不是受支持的标准 npm 启动器；请改用原生可执行文件，避免通过 Shell 运行任意脚本",
-        )?;
-    let root = shim.parent().context("npm 启动器目录无效")?;
-    let target = std::fs::canonicalize(root.join(relative))
-        .context("npm 启动器指向的 JavaScript 文件不存在")?;
-    let node_modules = std::fs::canonicalize(root.join("node_modules"))
-        .context("npm 启动器缺少 node_modules 目录")?;
-    if !target.starts_with(&node_modules) || !target.is_file() {
-        bail!("npm 启动器目标不在受信任的 node_modules 中");
-    }
-    let adjacent_node = root.join("node.exe");
-    let node = if adjacent_node.is_file() {
-        std::fs::canonicalize(adjacent_node).context("无法解析 npm 启动器旁的 node.exe")?
-    } else {
-        find_native_windows_executable("node").context("找不到 node.exe，无法安全运行 npm CLI")?
-    };
-    Ok(ResolvedExecutable {
-        executable: windows_argument_path(&node),
-        // Node treats Win32's `\\?\` canonical-path prefix as a module name and
-        // resolves it incorrectly. Keep the canonical path for the trust check,
-        // but pass the equivalent ordinary absolute path as argv.
-        prefix_args: vec![windows_argument_path(&target)],
     })
 }
 
@@ -560,37 +529,6 @@ fn executable_extensions(_program: &str) -> Vec<String> {
     vec![String::new()]
 }
 
-#[cfg(windows)]
-fn safe_environment_names() -> &'static [&'static str] {
-    &[
-        "PATH",
-        "PATHEXT",
-        "COMSPEC",
-        "SYSTEMROOT",
-        "WINDIR",
-        "TEMP",
-        "TMP",
-        "USERPROFILE",
-        "APPDATA",
-        "LOCALAPPDATA",
-        "PROGRAMDATA",
-        // PowerShell 7 derives its built-in module search path from this value.
-        "PSModulePath",
-    ]
-}
-
-#[cfg(not(windows))]
-fn safe_environment_names() -> &'static [&'static str] {
-    &[
-        "PATH",
-        "HOME",
-        "TMPDIR",
-        "LANG",
-        "LC_ALL",
-        "XDG_CONFIG_HOME",
-    ]
-}
-
 fn lock_error<T>(error: std::sync::PoisonError<T>) -> anyhow::Error {
     anyhow::anyhow!("终端会话锁损坏：{error}")
 }
@@ -599,6 +537,21 @@ fn lock_error<T>(error: std::sync::PoisonError<T>) -> anyhow::Error {
 mod tests {
     use super::*;
     use std::time::{Duration, Instant};
+
+    #[test]
+    fn output_buffer_keeps_medium_bursts_and_reports_real_overflow() {
+        let mut medium = OutputBuffer::default();
+        medium.push(&vec![b'A'; 220_000]);
+        let (output, truncated) = medium.take_redacted(&[], false);
+        assert_eq!(output.len(), 220_000);
+        assert!(!truncated);
+
+        let mut large = OutputBuffer::default();
+        large.push(&vec![b'B'; MAX_OUTPUT + 1]);
+        let (output, truncated) = large.take_redacted(&[], false);
+        assert_eq!(output.len(), MAX_OUTPUT);
+        assert!(truncated);
+    }
 
     fn read_until(
         manager: &TerminalManager,
@@ -828,7 +781,7 @@ mod tests {
         );
         assert!(initial.running);
         manager
-            .fill_value(session.session_id, "pty-secret-marker-64928")
+            .fill_value(session.session_id, "pty-secret-marker-64928", false)
             .unwrap();
         let after_fill = manager.read(session.session_id).unwrap();
         combined.push_str(&after_fill.output);
@@ -861,9 +814,56 @@ mod tests {
         manager.close(session.session_id).unwrap();
     }
 
+    #[test]
+    fn terminal_fill_can_submit_and_redact_in_one_call() {
+        let manager = TerminalManager::new();
+        #[cfg(windows)]
+        let (program, args) = (
+            "cmd.exe".to_owned(),
+            vec![
+                "/d".into(),
+                "/q".into(),
+                "/v:on".into(),
+                "/c".into(),
+                "set /p VAULT_INPUT=PASSWORD READY: & echo received=!VAULT_INPUT!".into(),
+            ],
+        );
+        #[cfg(not(windows))]
+        let (program, args) = (
+            "sh".to_owned(),
+            vec![
+                "-c".into(),
+                "printf 'PASSWORD READY: '; read VAULT_INPUT; printf 'received=%s\\n' \"$VAULT_INPUT\""
+                    .into(),
+            ],
+        );
+        let session = manager.open(&program, args, None).unwrap();
+        let mut output = String::new();
+        read_until(
+            &manager,
+            session.session_id,
+            &mut output,
+            Duration::from_secs(2),
+            |output, _| output.contains("PASSWORD READY"),
+        );
+        manager
+            .fill_value(session.session_id, "one-call-secret-7319", true)
+            .unwrap();
+        read_until(
+            &manager,
+            session.session_id,
+            &mut output,
+            Duration::from_secs(2),
+            |output, result| !result.running && output.contains("received=[REDACTED]"),
+        );
+        assert!(output.contains("received=[REDACTED]"));
+        assert!(!output.contains("one-call-secret-7319"));
+        manager.close(session.session_id).unwrap();
+    }
+
     #[cfg(not(windows))]
     #[test]
-    fn terminal_sets_a_useful_term_after_clearing_environment() {
+    fn terminal_sets_a_useful_term() {
         let manager = TerminalManager::new();
         let session = manager
             .open(
@@ -886,7 +886,7 @@ mod tests {
 
     #[cfg(windows)]
     #[test]
-    fn standard_npm_cmd_shim_runs_via_node_without_a_shell() {
+    fn standard_npm_cmd_shim_runs_through_the_native_command_processor() {
         let temp = tempfile::tempdir().unwrap();
         let root = temp.path();
         let target = root.join("node_modules").join("demo-cli").join("cli.js");
@@ -896,7 +896,7 @@ mod tests {
         std::fs::write(
             &shim,
             r#"@ECHO off
-"%dp0%\node.exe" "%dp0%\node_modules\demo-cli\cli.js" %*"#,
+node "%~dp0node_modules\demo-cli\cli.js" %*"#,
         )
         .unwrap();
 
@@ -904,25 +904,25 @@ mod tests {
         let session = manager
             .open(
                 shim.to_str().unwrap(),
-                vec!["literal with spaces".into(), "&no-shell".into()],
+                vec!["literal with spaces".into(), "plain-arg".into()],
                 None,
             )
             .unwrap();
-        assert!(session.executable.ends_with("node.exe"));
+        assert!(session.executable.ends_with("cmd.exe"));
         let mut output = String::new();
         read_until(
             &manager,
             session.session_id,
             &mut output,
             Duration::from_secs(5),
-            |output, result| !result.running && output.contains("literal with spaces|&no-shell"),
+            |output, result| !result.running && output.contains("literal with spaces|plain-arg"),
         );
         manager.close(session.session_id).unwrap();
     }
 
     #[cfg(windows)]
     #[test]
-    fn powershell_7_starts_with_the_sanitized_terminal_environment() {
+    fn powershell_7_starts_with_the_inherited_terminal_environment() {
         let manager = TerminalManager::new();
         let session = manager
             .open(
@@ -954,7 +954,7 @@ mod tests {
 
     #[cfg(windows)]
     #[test]
-    fn windows_powershell_5_starts_with_the_sanitized_terminal_environment() {
+    fn windows_powershell_5_starts_with_the_inherited_terminal_environment() {
         let powershell = PathBuf::from(std::env::var_os("SYSTEMROOT").unwrap())
             .join("System32")
             .join("WindowsPowerShell")
@@ -1002,22 +1002,19 @@ mod tests {
 
     #[cfg(windows)]
     #[test]
-    fn arbitrary_windows_batch_scripts_are_rejected_clearly() {
+    fn windows_batch_scripts_run_through_the_native_command_processor() {
         let temp = tempfile::tempdir().unwrap();
-        let batch = temp.path().join("unsafe.bat");
-        std::fs::write(&batch, "@echo off\r\necho unsafe").unwrap();
-        let error = resolve_executable(batch.to_str().unwrap(), None)
-            .err()
-            .unwrap()
-            .to_string();
-        assert!(error.contains(".bat"), "unexpected error: {error}");
-
-        let command = temp.path().join("unsupported.cmd");
-        std::fs::write(&command, "@echo off\r\necho unsupported").unwrap();
-        let error = resolve_executable(command.to_str().unwrap(), None)
-            .err()
-            .unwrap()
-            .to_string();
-        assert!(error.contains("标准 npm"), "unexpected error: {error}");
+        for extension in ["bat", "cmd"] {
+            let script = temp.path().join(format!("fixture.{extension}"));
+            std::fs::write(&script, "@echo off\r\necho KRU-BATCH-OK").unwrap();
+            let resolved = resolve_executable(script.to_str().unwrap(), None).unwrap();
+            assert!(
+                Path::new(&resolved.executable)
+                    .file_name()
+                    .is_some_and(|name| name.eq_ignore_ascii_case("cmd.exe"))
+            );
+            assert_eq!(resolved.prefix_args[0..4], ["/d", "/s", "/c", "call"]);
+            assert_eq!(resolved.prefix_args[4], script.to_string_lossy());
+        }
     }
 }

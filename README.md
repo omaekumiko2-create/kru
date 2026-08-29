@@ -1,6 +1,8 @@
 <p align="center">
-  <img src=".github/assets/kru-hero.svg" alt="KRU — Key Relay Unit" width="100%" />
+  <img src=".github/assets/kru-hero.svg" alt="KRU local MCP password and credential manager for AI agents" width="100%" />
 </p>
+
+<h1 align="center">KRU — Local password and credential manager for AI agents</h1>
 
 <p align="center">
   <strong>A local MCP credential relay that keeps agent workflows moving without exposing hidden plaintext.</strong>
@@ -19,6 +21,10 @@
 </p>
 
 ---
+
+KRU is a free, open-source, cross-platform password manager, credential vault, and local `stdio` MCP server for AI agents. It lets MCP clients such as Codex, Claude Code, Cursor, OpenCode, and OpenClaw use saved passwords, API credentials, SSH keys, TOTP codes, and custom secrets while hidden plaintext stays outside the normal model context.
+
+Use KRU when an agent needs to sign in to a website, connect to a server, call an authenticated API, or finish a terminal prompt without asking you to paste a secret into the conversation.
 
 ## Use KRU like this
 
@@ -50,7 +56,7 @@ There is no KRU account, subscription, cloud vault, or remote MCP service. KRU i
 </table>
 
 <p align="center">
-  <img src=".github/assets/kru-flow.svg" alt="Agent delegates the credential step to KRU" width="100%" />
+  <img src=".github/assets/kru-flow.svg" alt="AI agent finds a credential item and KRU uses the hidden secret locally" width="100%" />
 </p>
 
 ## Start in three steps
@@ -65,6 +71,10 @@ There is no KRU account, subscription, cloud vault, or remote MCP service. KRU i
    Give it a unique name and add only the modules you need. You can start from a preset or build the item module by module.
 
 KRU registers a local `stdio` MCP command. The MCP process starts on demand when the agent calls it.
+
+## MCP client compatibility
+
+KRU's Agent connection screen can detect, connect, and repair local configuration for **Codex**, **Claude Code**, **Cursor**, **OpenCode**, and **OpenClaw**. Other AI assistants and coding agents can connect through the manual configuration below whenever they support a local `stdio` MCP server.
 
 ## One item, several actions
 
@@ -132,6 +142,24 @@ Replacing or upgrading the executable does not remove your vault. KRU intentiona
 | Linux | `${XDG_DATA_HOME:-~/.local/share}/mcp-vault/v2` |
 
 Exported `.mvault` packages are encrypted and portable, but they contain their own unlock material for easy import. Protect a backup file as carefully as the original credentials.
+
+## Common questions
+
+### Is KRU a password manager for AI agents?
+
+Yes. KRU combines a locally encrypted credential vault with an MCP server that agents can call when a task reaches an authentication step. It is designed for AI coding agents, terminal agents, and other local MCP clients.
+
+### Does KRU give my password to the LLM?
+
+Not by default. Hidden modules are used locally by KRU and are excluded from MCP responses and normal model context. You can explicitly make an individual module visible when a workflow genuinely requires the value.
+
+### What credentials can KRU store and use?
+
+KRU supports usernames, passwords, API keys and tokens, SSH private keys and passphrases, TOTP seeds, hosts, ports, service URLs, and custom fields. Modules can be combined freely in one item.
+
+### Does KRU require a cloud account?
+
+No. KRU is a local-first, account-free secrets manager. The app, vault, MCP server, activity records, and backups remain under your control on the current device.
 
 ## Downloads
 

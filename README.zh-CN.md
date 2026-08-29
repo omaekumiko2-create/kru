@@ -1,6 +1,8 @@
 <p align="center">
-  <img src=".github/assets/kru-hero.svg" alt="KRU — Key Relay Unit" width="100%" />
+  <img src=".github/assets/kru-hero.svg" alt="KRU 面向 AI Agent 的本地 MCP 密码与凭据管理器" width="100%" />
 </p>
+
+<h1 align="center">KRU — 跨平台 AI Agent 密码库与凭据输入器</h1>
 
 <p align="center">
   <strong>一个本地 MCP 凭据中继工具：不中断 Agent 工作流，也不必让 Agent 接触隐藏的明文。</strong>
@@ -19,6 +21,10 @@
 </p>
 
 ---
+
+KRU 是一个免费开源、跨平台的 AI Agent 密码管理器、凭据保险库与本地 `stdio` MCP 服务。Codex、Claude Code、Cursor、OpenCode、OpenClaw 等 MCP 客户端可以通过 KRU 使用已保存的密码、API 凭据、SSH 私钥、TOTP 与自定义秘密，同时让默认隐藏的明文保持在普通模型上下文之外。
+
+当 Agent 需要登录网站、连接服务器、调用认证 API，或在终端中完成密码输入时，可以让 KRU 在本地完成凭据步骤，不必把秘密粘贴进对话。
 
 ## 你可以这样用
 
@@ -50,7 +56,7 @@ KRU 没有账号、订阅、云端密码库或远程 MCP 服务。它免费开�
 </table>
 
 <p align="center">
-  <img src=".github/assets/kru-flow.svg" alt="Agent 将凭据步骤交给 KRU" width="100%" />
+  <img src=".github/assets/kru-flow.svg" alt="AI Agent 找到凭据项目后由 KRU 在本地使用隐藏秘密" width="100%" />
 </p>
 
 ## 三步开始使用
@@ -65,6 +71,10 @@ KRU 没有账号、订阅、云端密码库或远程 MCP 服务。它免费开�
    设置不可重复的项目名称，只添加真正需要的模块；既可以选择预设，也可以从空白开始组合。
 
 KRU 注册的是本地 `stdio` MCP。Agent 调用时才会启动对应 MCP 进程。
+
+## MCP 客户端兼容性
+
+KRU 的 Agent 接入界面可以检测、连接并修复 **Codex**、**Claude Code**、**Cursor**、**OpenCode** 与 **OpenClaw** 的本地配置。其他 AI 助手或编程 Agent 只要支持本地 `stdio` MCP 服务，也可以使用下方的手动配置接入。
 
 ## 一个项目，多种动作
 
@@ -130,6 +140,24 @@ KRU 会识别常见 API 服务与 Basic 认证组合，无法识别时使用 Bea
 | Linux | `${XDG_DATA_HOME:-~/.local/share}/mcp-vault/v2` |
 
 导出的 `.mvault` 包经过加密并可跨设备导入，但为了免密码导入，包内同时携带自动解锁材料。请像保护原始凭据一样保护备份文件。
+
+## 常见问题
+
+### KRU 是面向 AI Agent 的密码管理器吗？
+
+是。KRU 把本地加密的凭据保险库与可由 Agent 调用的 MCP 服务结合在一起，用于处理任务中的认证步骤，适合 AI 编程 Agent、终端 Agent 和其他本地 MCP 客户端。
+
+### KRU 会把密码交给大模型吗？
+
+默认不会。隐藏模块只由 KRU 在本地使用，不会出现在 MCP 返回或普通模型上下文中。只有用户明确打开某个模块的可见开关后，该值才允许返回给 Agent。
+
+### KRU 可以保存和使用哪些凭据？
+
+KRU 支持账号、密码、API Key 与 Token、SSH 私钥与口令、TOTP 种子、主机、端口、服务 URL 和自定义字段，并可在同一项目中自由组合这些模块。
+
+### KRU 需要云端账号吗？
+
+不需要。KRU 是一个本地优先、无需账号的秘密管理工具；应用、保险库、MCP 服务、操作记录与备份都由用户在当前设备上控制。
 
 ## 下载
 

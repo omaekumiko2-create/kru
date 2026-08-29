@@ -1,9 +1,10 @@
 use crate::{
     model::{SecretBundle, StoredConnection},
     policy::{
-        assert_api_request_allowed, blocked_header_names, redact, redirect_target_allowed,
+        blocked_header_names, normalize_api_request_method, redact, redirect_target_supported,
         validate_ssh_command, visible_response_headers,
     },
+    storage::resolve_user_path,
     vault::{DecryptedConnection, Vault},
 };
 use anyhow::{Context, Result, bail};
@@ -20,19 +21,25 @@ use russh_sftp::{client::SftpSession, protocol::OpenFlags};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use std::{collections::HashMap, fmt::Display, sync::Arc, time::Duration};
+use std::{
+    collections::{HashMap, HashSet},
+    fmt::Display,
+    path::{Path, PathBuf},
+    process::Stdio,
+    sync::Arc,
+    time::Duration,
+};
 use tokio::io::AsyncWriteExt;
 use url::Url;
 use uuid::Uuid;
 
-const DEFAULT_API_RESULT_LENGTH: usize = 1_048_576;
-const MAX_API_RESULT_LENGTH: usize = 16_777_216;
-const MAX_SSH_STREAM_LENGTH: usize = 1_048_576;
+#[cfg(unix)]
+use std::os::unix::process::ExitStatusExt;
+
 // SSH `exec` carries the complete command in one protocol packet. Keep direct
 // requests comfortably below the usual 32 KiB packet limit and stream larger
 // commands to the account's configured remote shell instead.
 const MAX_DIRECT_SSH_COMMAND_LENGTH: usize = 16_384;
-const SSH_CONNECT_TIMEOUT: Duration = Duration::from_secs(20);
 
 #[derive(Debug, Clone, Default, Deserialize, JsonSchema)]
 #[serde(rename_all = "camelCase")]
@@ -69,6 +76,9 @@ pub struct ApiRequestInput {
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct ApiUploadFile {
     pub field: String,
+    #[schemars(
+        description = "Local file path. Absolute and ~/ paths are accepted; relative paths resolve from the KRU MCP process working directory."
+    )]
     pub path: String,
     #[serde(default)]
     pub file_name: Option<String>,
@@ -140,9 +150,19 @@ pub struct SshResponse {
 #[serde(rename_all = "camelCase")]
 pub struct SshTransferResponse {
     pub direction: String,
+    pub kind: String,
     pub local_path: String,
     pub remote_path: String,
     pub bytes_transferred: u64,
+    pub files_transferred: u64,
+    pub directories_transferred: u64,
+}
+
+#[derive(Debug, Default)]
+struct TransferStats {
+    bytes: u64,
+    files: u64,
+    directories: u64,
 }
 
 pub async fn execute_api(
@@ -160,7 +180,7 @@ pub async fn execute_api(
         None => None,
     };
     let overwrite_response_file = input.overwrite_response_file;
-    let method = assert_api_request_allowed(&connection.stored, &input.method, &target)?;
+    let method = normalize_api_request_method(&input.method, &target)?;
     let method = Method::from_bytes(method.as_bytes()).context("HTTP 方法无效")?;
     let blocked = blocked_header_names(&connection.stored);
     let mut headers = HeaderMap::new();
@@ -180,30 +200,15 @@ pub async fn execute_api(
         &mut target,
     )?;
 
-    let response_limit = if save_response_to.is_some() {
-        DEFAULT_API_RESULT_LENGTH
-    } else {
-        match input.max_response_bytes.filter(|limit| *limit > 0) {
-            Some(limit) if limit > MAX_API_RESULT_LENGTH => {
-                bail!("API 响应读取上限不能超过 16 MiB")
-            }
-            Some(limit) => limit,
-            None => DEFAULT_API_RESULT_LENGTH,
-        }
-    };
-    let redirect_origin = target.clone();
-    let mut client_builder = Client::builder()
-        .redirect(reqwest::redirect::Policy::custom(move |attempt| {
-            if attempt.previous().len() >= 10 {
-                return attempt.error("too many redirects");
-            }
-            if redirect_target_allowed(&redirect_origin, attempt.url()) {
+    let response_limit = input.max_response_bytes.filter(|limit| *limit > 0);
+    let mut client_builder =
+        Client::builder().redirect(reqwest::redirect::Policy::custom(move |attempt| {
+            if redirect_target_supported(attempt.url()) {
                 attempt.follow()
             } else {
                 attempt.stop()
             }
-        }))
-        .connect_timeout(Duration::from_secs(20));
+        }));
     if let Some(seconds) = input.timeout_seconds.filter(|seconds| *seconds > 0) {
         client_builder = client_builder.timeout(Duration::from_secs(seconds));
     }
@@ -229,15 +234,15 @@ pub async fn execute_api(
             if field.is_empty() {
                 bail!("上传文件的字段名不能为空");
             }
-            let path = std::path::Path::new(file.path.trim());
-            if !tokio::fs::metadata(path)
+            let path = resolve_user_path(&file.path)?;
+            if !tokio::fs::metadata(&path)
                 .await
                 .context("无法读取上传文件")?
                 .is_file()
             {
                 bail!("上传路径不是普通文件");
             }
-            let mut part = reqwest::multipart::Part::file(path)
+            let mut part = reqwest::multipart::Part::file(&path)
                 .await
                 .context("无法打开上传文件")?;
             if let Some(file_name) = file.file_name.filter(|value| !value.trim().is_empty()) {
@@ -303,15 +308,19 @@ pub async fn execute_api(
     let mut bytes = Vec::new();
     let mut truncated = false;
     while let Some(chunk) = response.chunk().await.context("无法读取 API 响应")? {
-        let remaining = response_limit.saturating_sub(bytes.len());
-        if remaining == 0 {
-            truncated = !chunk.is_empty();
-            break;
-        }
-        bytes.extend_from_slice(&chunk[..chunk.len().min(remaining)]);
-        if chunk.len() > remaining {
-            truncated = true;
-            break;
+        if let Some(limit) = response_limit {
+            let remaining = limit.saturating_sub(bytes.len());
+            if remaining == 0 {
+                truncated = !chunk.is_empty();
+                break;
+            }
+            bytes.extend_from_slice(&chunk[..chunk.len().min(remaining)]);
+            if chunk.len() > remaining {
+                truncated = true;
+                break;
+            }
+        } else {
+            bytes.extend_from_slice(&chunk);
         }
     }
     let body = sanitize_api_body(
@@ -344,7 +353,7 @@ async fn prepare_api_response_destination(
     if destination.is_empty() || destination.contains('\0') {
         bail!("API 响应保存路径无效");
     }
-    let destination = std::path::PathBuf::from(destination);
+    let destination = resolve_user_path(destination)?;
     if let Some(parent) = destination
         .parent()
         .filter(|path| !path.as_os_str().is_empty())
@@ -425,17 +434,20 @@ pub async fn execute_ssh(
     command: &str,
     cwd: Option<&str>,
     timeout_seconds: Option<u64>,
+    secret_env: &HashMap<String, String>,
+    stdin: Option<&str>,
 ) -> Result<SshResponse> {
     if !connection.stored.enabled {
         bail!("该连接已禁用");
     }
     let command = validate_ssh_command(command)?;
+    let command = ssh_command_with_secret_environment(&command, secret_env)?;
     let command = match cwd.map(str::trim).filter(|value| !value.is_empty()) {
         Some(cwd) => format!("cd -- {} && {command}", shell_quote(cwd)),
         None => command,
     };
     let command = validate_ssh_command(&command)?;
-    let execution = execute_ssh_inner(vault, connection, &command);
+    let execution = execute_ssh_inner(vault, connection, &command, stdin);
     match timeout_seconds.filter(|seconds| *seconds > 0) {
         Some(seconds) => tokio::time::timeout(Duration::from_secs(seconds), execution)
             .await
@@ -444,20 +456,161 @@ pub async fn execute_ssh(
     }
 }
 
+pub async fn execute_local(
+    connection: Option<&DecryptedConnection>,
+    command: &str,
+    cwd: Option<&str>,
+    timeout_seconds: Option<u64>,
+    secret_env: &HashMap<String, String>,
+    stdin: Option<&str>,
+) -> Result<SshResponse> {
+    let command = command.trim();
+    if command.is_empty() || command.contains('\0') {
+        bail!("本地命令不能为空或包含空字符");
+    }
+    if connection.is_some_and(|connection| !connection.stored.enabled) {
+        bail!("该连接已禁用");
+    }
+
+    #[cfg(windows)]
+    let mut process = {
+        let mut process = tokio::process::Command::new("powershell.exe");
+        process.args(["-NoProfile", "-NonInteractive", "-Command", command]);
+        process
+    };
+    #[cfg(not(windows))]
+    let mut process = {
+        let shell = std::env::var("SHELL")
+            .ok()
+            .filter(|value| !value.trim().is_empty())
+            .unwrap_or_else(|| "/bin/sh".to_owned());
+        let mut process = tokio::process::Command::new(shell);
+        process.args(["-lc", command]);
+        process
+    };
+
+    if let Some(cwd) = cwd.map(str::trim).filter(|value| !value.is_empty()) {
+        let cwd = resolve_user_path(cwd)?;
+        if !cwd.is_dir() {
+            bail!("本地命令工作目录不存在或不是目录");
+        }
+        process.current_dir(cwd);
+    }
+    for (name, value) in secret_env {
+        if !valid_environment_name(name) {
+            bail!("terminal_run secretEnv 环境变量名称无效：{name}");
+        }
+        if value.contains('\0') {
+            bail!("该秘密模块不能作为本地环境变量使用");
+        }
+        process.env(name, value);
+    }
+    process
+        .stdin(if stdin.is_some() {
+            Stdio::piped()
+        } else {
+            Stdio::null()
+        })
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .kill_on_drop(true);
+    let stdin = stdin.map(str::as_bytes).map(<[u8]>::to_vec);
+    let execution = async {
+        let mut child = process.spawn().context("无法启动本地命令")?;
+        let input_task = if let Some(input) = stdin {
+            let mut child_stdin = child.stdin.take().context("无法打开本地命令标准输入")?;
+            Some(tokio::spawn(async move {
+                child_stdin.write_all(&input).await?;
+                child_stdin.shutdown().await
+            }))
+        } else {
+            None
+        };
+        let output = child.wait_with_output().await.context("无法等待本地命令")?;
+        if let Some(task) = input_task {
+            task.await.context("本地命令标准输入任务异常结束")??;
+        }
+        Ok::<_, anyhow::Error>(output)
+    };
+    let output = match timeout_seconds.filter(|seconds| *seconds > 0) {
+        Some(seconds) => tokio::time::timeout(Duration::from_secs(seconds), execution)
+            .await
+            .map_err(|_| anyhow::anyhow!("本地命令超过调用方设置的 {seconds} 秒超时"))??,
+        None => execution.await?,
+    };
+    let mut stdout = String::from_utf8_lossy(&output.stdout).into_owned();
+    let mut stderr = String::from_utf8_lossy(&output.stderr).into_owned();
+    if let Some(connection) = connection {
+        stdout = redact(stdout, &connection.stored, &connection.secrets);
+        stderr = redact(stderr, &connection.stored, &connection.secrets);
+    }
+    #[cfg(unix)]
+    let signal = output.status.signal().map(|signal| signal.to_string());
+    #[cfg(not(unix))]
+    let signal = None;
+    Ok(SshResponse {
+        exit_code: output.status.code().map(|code| code as u32),
+        signal,
+        stdout,
+        stderr,
+        stdout_truncated: false,
+        stderr_truncated: false,
+    })
+}
+
+fn ssh_command_with_secret_environment(
+    command: &str,
+    secret_env: &HashMap<String, String>,
+) -> Result<String> {
+    if secret_env.is_empty() {
+        return Ok(command.to_owned());
+    }
+    let mut variables = secret_env.iter().collect::<Vec<_>>();
+    variables.sort_by(|left, right| left.0.cmp(right.0));
+    let mut assignments = Vec::with_capacity(variables.len());
+    for (name, value) in variables {
+        if !valid_environment_name(name) {
+            bail!("SSH secretEnv 环境变量名称无效：{name}");
+        }
+        if value.contains('\0') {
+            bail!("该秘密模块不能作为 SSH 环境变量使用");
+        }
+        assignments.push(format!("{name}={}", shell_quote(value)));
+    }
+    Ok(format!(
+        "{} sh -c {}",
+        assignments.join(" "),
+        shell_quote(command)
+    ))
+}
+
+fn valid_environment_name(name: &str) -> bool {
+    let mut characters = name.chars();
+    matches!(characters.next(), Some('_' | 'a'..='z' | 'A'..='Z'))
+        && characters.all(|character| character == '_' || character.is_ascii_alphanumeric())
+}
+
 async fn execute_ssh_inner(
     vault: &Vault,
     connection: &DecryptedConnection,
     command: &str,
+    stdin: Option<&str>,
 ) -> Result<SshResponse> {
     let session = connect_ssh(vault, connection).await?;
     let channel = session.channel_open_session().await?;
     let send_task;
     let mut reader;
-    if command.len() <= MAX_DIRECT_SSH_COMMAND_LENGTH {
+    if command.len() <= MAX_DIRECT_SSH_COMMAND_LENGTH || stdin.is_some() {
         channel.exec(true, command).await?;
-        let (read_half, _write_half) = channel.split();
+        let (read_half, write_half) = channel.split();
         reader = read_half;
-        send_task = None;
+        send_task = stdin.map(|stdin| {
+            let input = stdin.as_bytes().to_vec();
+            tokio::spawn(async move {
+                write_half.data_bytes(input).await?;
+                write_half.eof().await
+            })
+        });
     } else {
         // A shell channel invokes the account's configured shell, so the same
         // path works for POSIX shells and Windows OpenSSH targets.
@@ -474,24 +627,12 @@ async fn execute_ssh_inner(
     }
     let mut stdout = Vec::new();
     let mut stderr = Vec::new();
-    let mut stdout_truncated = false;
-    let mut stderr_truncated = false;
     let mut exit_code = None;
     let mut signal = None;
     while let Some(message) = reader.wait().await {
         match message {
-            ChannelMsg::Data { data } => append_limited(
-                &mut stdout,
-                &data,
-                &mut stdout_truncated,
-                MAX_SSH_STREAM_LENGTH,
-            ),
-            ChannelMsg::ExtendedData { data, .. } => append_limited(
-                &mut stderr,
-                &data,
-                &mut stderr_truncated,
-                MAX_SSH_STREAM_LENGTH,
-            ),
+            ChannelMsg::Data { data } => stdout.extend_from_slice(&data),
+            ChannelMsg::ExtendedData { data, .. } => stderr.extend_from_slice(&data),
             ChannelMsg::ExitStatus { exit_status } => exit_code = Some(exit_status),
             ChannelMsg::ExitSignal { signal_name, .. } => signal = Some(format!("{signal_name:?}")),
             _ => {}
@@ -504,12 +645,12 @@ async fn execute_ssh_inner(
         .disconnect(Disconnect::ByApplication, "", "en")
         .await;
     let stdout = redact(
-        with_truncation_marker(stdout, stdout_truncated),
+        String::from_utf8_lossy(&stdout).into_owned(),
         &connection.stored,
         &connection.secrets,
     );
     let stderr = redact(
-        with_truncation_marker(stderr, stderr_truncated),
+        String::from_utf8_lossy(&stderr).into_owned(),
         &connection.stored,
         &connection.secrets,
     );
@@ -518,8 +659,8 @@ async fn execute_ssh_inner(
         signal,
         stdout,
         stderr,
-        stdout_truncated,
-        stderr_truncated,
+        stdout_truncated: false,
+        stderr_truncated: false,
     })
 }
 
@@ -528,24 +669,13 @@ async fn connect_ssh(
     connection: &DecryptedConnection,
 ) -> Result<client::Handle<SshClient>> {
     let handler = SshClient;
-    let config = Arc::new(client::Config {
-        inactivity_timeout: Some(Duration::from_secs(60)),
-        keepalive_interval: Some(Duration::from_secs(10)),
-        keepalive_max: 2,
-        ..Default::default()
-    });
-    let session = tokio::time::timeout(
-        SSH_CONNECT_TIMEOUT,
-        client::connect(
-            config,
-            (connection.stored.host.as_str(), connection.stored.port),
-            handler,
-        ),
+    let mut session = client::connect(
+        Arc::new(client::Config::default()),
+        (connection.stored.host.as_str(), connection.stored.port),
+        handler,
     )
     .await
-    .map_err(|_| anyhow::anyhow!("SSH TCP 连接超时；请检查目标地址、VPN/代理路由和端口"))?;
-    let mut session =
-        session.map_err(|error| anyhow::anyhow!(ssh_connect_error_message(&error)))?;
+    .map_err(|error| anyhow::anyhow!(ssh_connect_error_message(&error)))?;
 
     let ssh_auth_type = if connection.stored.ssh_auth_type.is_empty() {
         connection.stored.auth_type.as_str()
@@ -604,7 +734,6 @@ async fn open_sftp(
     let sftp = SftpSession::new(channel.into_stream())
         .await
         .context("无法初始化 SFTP 会话")?;
-    sftp.set_timeout(120);
     Ok((session, sftp))
 }
 
@@ -622,48 +751,29 @@ pub async fn ssh_upload(
     let local_path = local_path.trim();
     let remote_path = validate_transfer_path(remote_path, "远端路径")?;
     if local_path.is_empty() || local_path.contains('\0') {
-        bail!("本地文件路径无效");
+        bail!("本地上传路径无效");
     }
     let execution = async {
+        let local_path = resolve_user_path(local_path)?;
         let canonical_local = tokio::fs::canonicalize(local_path)
             .await
-            .context("找不到本地上传文件")?;
-        if !tokio::fs::metadata(&canonical_local).await?.is_file() {
-            bail!("本地上传路径不是普通文件");
+            .context("找不到本地上传路径")?;
+        let metadata = tokio::fs::metadata(&canonical_local).await?;
+        if !metadata.is_file() && !metadata.is_dir() {
+            bail!("本地上传路径不是文件或目录");
         }
-        let mut local = tokio::fs::File::open(&canonical_local)
-            .await
-            .context("无法打开本地上传文件")?;
         let (session, sftp) = open_sftp(vault, connection).await?;
         let remote_path = resolve_remote_path(&sftp, &remote_path).await?;
-        ensure_remote_parent_directories(&sftp, &remote_path).await?;
-        if !overwrite && sftp.try_exists(remote_path.clone()).await? {
-            bail!("远端文件已存在；如需替换，请明确设置 overwrite=true");
-        }
-        let temporary_path = format!("{remote_path}.kru-{}.part", Uuid::new_v4().simple());
-        let transfer_result: Result<u64> = async {
-            let mut remote = sftp
-                .open_with_flags(
-                    temporary_path.clone(),
-                    OpenFlags::CREATE | OpenFlags::EXCLUDE | OpenFlags::WRITE,
-                )
-                .await
-                .context("无法创建远端临时文件")?;
-            let bytes = tokio::io::copy(&mut local, &mut remote)
-                .await
-                .context("SFTP 上传中断")?;
-            remote.flush().await.context("无法刷新远端文件")?;
-            remote.shutdown().await.context("无法关闭远端文件")?;
-            commit_remote_file(&sftp, &temporary_path, &remote_path, overwrite).await?;
-            Ok(bytes)
-        }
-        .await;
-        let bytes_transferred = match transfer_result {
-            Ok(bytes) => bytes,
-            Err(error) => {
-                let _ = sftp.remove_file(temporary_path).await;
-                return Err(error);
-            }
+        let (kind, stats) = if metadata.is_dir() {
+            (
+                "directory",
+                upload_local_directory(&sftp, &canonical_local, &remote_path, overwrite).await?,
+            )
+        } else {
+            (
+                "file",
+                upload_local_file(&sftp, &canonical_local, &remote_path, overwrite).await?,
+            )
         };
         let _ = sftp.close().await;
         let _ = session
@@ -671,12 +781,15 @@ pub async fn ssh_upload(
             .await;
         Ok(SshTransferResponse {
             direction: "upload".to_owned(),
+            kind: kind.to_owned(),
             local_path: canonical_local.to_string_lossy().into_owned(),
             remote_path,
-            bytes_transferred,
+            bytes_transferred: stats.bytes,
+            files_transferred: stats.files,
+            directories_transferred: stats.directories,
         })
     };
-    run_optional_ssh_timeout(execution, timeout_seconds, "SSH 文件上传").await
+    run_optional_ssh_timeout(execution, timeout_seconds, "SSH 上传").await
 }
 
 pub async fn ssh_download(
@@ -695,54 +808,26 @@ pub async fn ssh_download(
     if local_path.is_empty() || local_path.contains('\0') {
         bail!("本地保存路径无效");
     }
-    let local_path = std::path::PathBuf::from(local_path);
+    let local_path = resolve_user_path(local_path)?;
     let execution = async {
-        if let Some(parent) = local_path
-            .parent()
-            .filter(|path| !path.as_os_str().is_empty())
-        {
-            tokio::fs::create_dir_all(parent)
-                .await
-                .context("无法创建本地目标目录")?;
-        }
-        if !overwrite && tokio::fs::try_exists(&local_path).await? {
-            bail!("本地文件已存在；如需替换，请明确设置 overwrite=true");
-        }
         let (session, sftp) = open_sftp(vault, connection).await?;
         let remote_path = resolve_remote_path(&sftp, &remote_path).await?;
-        let mut remote = sftp
-            .open(remote_path.clone())
+        let remote_metadata = sftp
+            .metadata(remote_path.clone())
             .await
-            .context("无法打开远端下载文件")?;
-        let file_name = local_path
-            .file_name()
-            .and_then(|name| name.to_str())
-            .unwrap_or("download");
-        let temporary_path =
-            local_path.with_file_name(format!(".{file_name}.kru-{}.part", Uuid::new_v4().simple()));
-        let transfer_result: Result<u64> = async {
-            let mut local = tokio::fs::OpenOptions::new()
-                .write(true)
-                .create_new(true)
-                .open(&temporary_path)
-                .await
-                .context("无法创建本地临时文件")?;
-            let bytes = tokio::io::copy(&mut remote, &mut local)
-                .await
-                .context("SFTP 下载中断")?;
-            local.flush().await.context("无法刷新本地文件")?;
-            local.sync_all().await.context("无法同步本地文件")?;
-            remote.shutdown().await.context("无法关闭远端文件")?;
-            commit_local_file(&temporary_path, &local_path, overwrite).await?;
-            Ok(bytes)
-        }
-        .await;
-        let bytes_transferred = match transfer_result {
-            Ok(bytes) => bytes,
-            Err(error) => {
-                let _ = tokio::fs::remove_file(&temporary_path).await;
-                return Err(error);
-            }
+            .context("找不到远端下载路径")?;
+        let (kind, stats) = if remote_metadata.file_type().is_dir() {
+            (
+                "directory",
+                download_remote_directory(&sftp, &remote_path, &local_path, overwrite).await?,
+            )
+        } else if remote_metadata.file_type().is_file() {
+            (
+                "file",
+                download_remote_file(&sftp, &remote_path, &local_path, overwrite).await?,
+            )
+        } else {
+            bail!("远端下载路径不是文件或目录");
         };
         let _ = sftp.close().await;
         let _ = session
@@ -750,16 +835,297 @@ pub async fn ssh_download(
             .await;
         Ok(SshTransferResponse {
             direction: "download".to_owned(),
+            kind: kind.to_owned(),
             local_path: tokio::fs::canonicalize(&local_path)
                 .await
                 .unwrap_or(local_path)
                 .to_string_lossy()
                 .into_owned(),
             remote_path,
-            bytes_transferred,
+            bytes_transferred: stats.bytes,
+            files_transferred: stats.files,
+            directories_transferred: stats.directories,
         })
     };
-    run_optional_ssh_timeout(execution, timeout_seconds, "SSH 文件下载").await
+    run_optional_ssh_timeout(execution, timeout_seconds, "SSH 下载").await
+}
+
+async fn upload_local_file(
+    sftp: &SftpSession,
+    local_path: &Path,
+    remote_path: &str,
+    overwrite: bool,
+) -> Result<TransferStats> {
+    ensure_remote_parent_directories(sftp, remote_path).await?;
+    if !overwrite && sftp.try_exists(remote_path.to_owned()).await? {
+        bail!("远端目标已存在；如需替换，请设置 overwrite=true");
+    }
+    let temporary_path = format!("{remote_path}.kru-{}.part", Uuid::new_v4().simple());
+    let result: Result<u64> = async {
+        let mut local = tokio::fs::File::open(local_path)
+            .await
+            .context("无法打开本地上传文件")?;
+        let mut remote = sftp
+            .open_with_flags(
+                temporary_path.clone(),
+                OpenFlags::CREATE | OpenFlags::EXCLUDE | OpenFlags::WRITE,
+            )
+            .await
+            .context("无法创建远端临时文件")?;
+        let bytes = tokio::io::copy(&mut local, &mut remote)
+            .await
+            .context("SFTP 上传中断")?;
+        remote.flush().await.context("无法刷新远端文件")?;
+        remote.shutdown().await.context("无法关闭远端文件")?;
+        commit_remote_file(sftp, &temporary_path, remote_path, overwrite).await?;
+        Ok(bytes)
+    }
+    .await;
+    match result {
+        Ok(bytes) => Ok(TransferStats {
+            bytes,
+            files: 1,
+            directories: 0,
+        }),
+        Err(error) => {
+            let _ = sftp.remove_file(temporary_path).await;
+            Err(error)
+        }
+    }
+}
+
+async fn upload_local_directory(
+    sftp: &SftpSession,
+    local_root: &Path,
+    remote_path: &str,
+    overwrite: bool,
+) -> Result<TransferStats> {
+    ensure_remote_parent_directories(sftp, remote_path).await?;
+    if !overwrite && sftp.try_exists(remote_path.to_owned()).await? {
+        bail!("远端目标已存在；如需替换，请设置 overwrite=true");
+    }
+    let temporary_path = format!("{remote_path}.kru-{}.part", Uuid::new_v4().simple());
+    sftp.create_dir(temporary_path.clone())
+        .await
+        .context("无法创建远端临时目录")?;
+
+    let result: Result<TransferStats> = async {
+        let mut stats = TransferStats {
+            directories: 1,
+            ..Default::default()
+        };
+        let mut visited = HashSet::from([tokio::fs::canonicalize(local_root).await?]);
+        let mut stack = vec![(local_root.to_path_buf(), String::new())];
+        while let Some((local_directory, relative_directory)) = stack.pop() {
+            let mut entries = tokio::fs::read_dir(&local_directory)
+                .await
+                .with_context(|| format!("无法读取本地目录 {}", local_directory.display()))?;
+            while let Some(entry) = entries.next_entry().await? {
+                let name = entry.file_name();
+                let relative_path = if relative_directory.is_empty() {
+                    PathBuf::from(&name)
+                } else {
+                    PathBuf::from(&relative_directory).join(&name)
+                };
+                let relative_remote = relative_path.to_string_lossy().replace('\\', "/");
+                let remote_entry = format!(
+                    "{}/{}",
+                    temporary_path.trim_end_matches('/'),
+                    relative_remote
+                );
+                let entry_path = entry.path();
+                let metadata = tokio::fs::metadata(&entry_path).await?;
+                if metadata.is_dir() {
+                    let canonical = tokio::fs::canonicalize(&entry_path).await?;
+                    if !visited.insert(canonical) {
+                        bail!("本地目录包含循环链接：{}", entry_path.display());
+                    }
+                    sftp.create_dir(remote_entry)
+                        .await
+                        .with_context(|| format!("无法创建远端目录 {relative_remote}"))?;
+                    stats.directories += 1;
+                    stack.push((entry_path, relative_remote));
+                } else if metadata.is_file() {
+                    let mut local = tokio::fs::File::open(&entry_path).await?;
+                    let mut remote = sftp
+                        .open_with_flags(
+                            remote_entry,
+                            OpenFlags::CREATE | OpenFlags::EXCLUDE | OpenFlags::WRITE,
+                        )
+                        .await?;
+                    stats.bytes += tokio::io::copy(&mut local, &mut remote)
+                        .await
+                        .context("SFTP 目录上传中断")?;
+                    remote.flush().await?;
+                    remote.shutdown().await?;
+                    stats.files += 1;
+                } else {
+                    bail!("本地目录包含无法传输的特殊文件：{}", entry_path.display());
+                }
+            }
+        }
+        commit_remote_directory(sftp, &temporary_path, remote_path, overwrite).await?;
+        Ok(stats)
+    }
+    .await;
+    if result.is_err() {
+        let _ = remove_remote_tree(sftp, &temporary_path).await;
+    }
+    result
+}
+
+async fn download_remote_file(
+    sftp: &SftpSession,
+    remote_path: &str,
+    local_path: &Path,
+    overwrite: bool,
+) -> Result<TransferStats> {
+    if let Some(parent) = local_path
+        .parent()
+        .filter(|path| !path.as_os_str().is_empty())
+    {
+        tokio::fs::create_dir_all(parent)
+            .await
+            .context("无法创建本地目标目录")?;
+    }
+    if !overwrite && tokio::fs::try_exists(local_path).await? {
+        bail!("本地目标已存在；如需替换，请设置 overwrite=true");
+    }
+    let file_name = local_path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or("download");
+    let temporary_path =
+        local_path.with_file_name(format!(".{file_name}.kru-{}.part", Uuid::new_v4().simple()));
+    let result: Result<u64> = async {
+        let mut remote = sftp
+            .open(remote_path.to_owned())
+            .await
+            .context("无法打开远端下载文件")?;
+        let mut local = tokio::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&temporary_path)
+            .await
+            .context("无法创建本地临时文件")?;
+        let bytes = tokio::io::copy(&mut remote, &mut local)
+            .await
+            .context("SFTP 下载中断")?;
+        local.flush().await.context("无法刷新本地文件")?;
+        local.sync_all().await.context("无法同步本地文件")?;
+        remote.shutdown().await.context("无法关闭远端文件")?;
+        commit_local_file(&temporary_path, local_path, overwrite).await?;
+        Ok(bytes)
+    }
+    .await;
+    match result {
+        Ok(bytes) => Ok(TransferStats {
+            bytes,
+            files: 1,
+            directories: 0,
+        }),
+        Err(error) => {
+            let _ = tokio::fs::remove_file(&temporary_path).await;
+            Err(error)
+        }
+    }
+}
+
+async fn download_remote_directory(
+    sftp: &SftpSession,
+    remote_root: &str,
+    local_path: &Path,
+    overwrite: bool,
+) -> Result<TransferStats> {
+    if let Some(parent) = local_path
+        .parent()
+        .filter(|path| !path.as_os_str().is_empty())
+    {
+        tokio::fs::create_dir_all(parent)
+            .await
+            .context("无法创建本地目标目录")?;
+    }
+    if !overwrite && tokio::fs::try_exists(local_path).await? {
+        bail!("本地目标已存在；如需替换，请设置 overwrite=true");
+    }
+    let directory_name = local_path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or("download");
+    let temporary_path = local_path.with_file_name(format!(
+        ".{directory_name}.kru-{}.part",
+        Uuid::new_v4().simple()
+    ));
+    tokio::fs::create_dir(&temporary_path)
+        .await
+        .context("无法创建本地临时目录")?;
+
+    let result: Result<TransferStats> = async {
+        let canonical_root = sftp
+            .canonicalize(remote_root.to_owned())
+            .await
+            .unwrap_or_else(|_| remote_root.to_owned());
+        let mut visited = HashSet::from([canonical_root]);
+        let mut stats = TransferStats {
+            directories: 1,
+            ..Default::default()
+        };
+        let mut stack = vec![(remote_root.to_owned(), PathBuf::new())];
+        while let Some((remote_directory, relative_directory)) = stack.pop() {
+            let entries = sftp
+                .read_dir(remote_directory.clone())
+                .await
+                .with_context(|| format!("无法读取远端目录 {remote_directory}"))?;
+            for entry in entries {
+                let name = entry.file_name();
+                let relative_path = relative_directory.join(&name);
+                let local_entry = temporary_path.join(&relative_path);
+                let remote_entry = entry.path();
+                let metadata = if entry.file_type().is_symlink() {
+                    sftp.metadata(remote_entry.clone()).await?
+                } else {
+                    entry.metadata()
+                };
+                if metadata.file_type().is_dir() {
+                    let canonical = sftp
+                        .canonicalize(remote_entry.clone())
+                        .await
+                        .unwrap_or_else(|_| remote_entry.clone());
+                    if !visited.insert(canonical) {
+                        bail!("远端目录包含循环链接：{remote_entry}");
+                    }
+                    tokio::fs::create_dir(&local_entry)
+                        .await
+                        .with_context(|| format!("无法创建本地目录 {}", local_entry.display()))?;
+                    stats.directories += 1;
+                    stack.push((remote_entry, relative_path));
+                } else if metadata.file_type().is_file() {
+                    let mut remote = sftp.open(remote_entry.clone()).await?;
+                    let mut local = tokio::fs::OpenOptions::new()
+                        .write(true)
+                        .create_new(true)
+                        .open(&local_entry)
+                        .await?;
+                    stats.bytes += tokio::io::copy(&mut remote, &mut local)
+                        .await
+                        .context("SFTP 目录下载中断")?;
+                    local.flush().await?;
+                    local.sync_all().await?;
+                    remote.shutdown().await?;
+                    stats.files += 1;
+                } else {
+                    bail!("远端目录包含无法传输的特殊文件：{remote_entry}");
+                }
+            }
+        }
+        commit_local_directory(&temporary_path, local_path, overwrite).await?;
+        Ok(stats)
+    }
+    .await;
+    if result.is_err() {
+        let _ = tokio::fs::remove_dir_all(&temporary_path).await;
+    }
+    result
 }
 
 async fn resolve_remote_path(sftp: &SftpSession, path: &str) -> Result<String> {
@@ -867,15 +1233,6 @@ async fn commit_remote_file(
     if !overwrite {
         bail!("远端文件已存在；如需替换，请明确设置 overwrite=true");
     }
-    if !sftp
-        .metadata(destination_path.to_owned())
-        .await?
-        .file_type()
-        .is_file()
-    {
-        bail!("远端目标已存在但不是普通文件，拒绝覆盖");
-    }
-
     let backup_path = format!("{destination_path}.kru-{}.backup", Uuid::new_v4().simple());
     sftp.rename(destination_path.to_owned(), backup_path.clone())
         .await
@@ -896,7 +1253,7 @@ async fn commit_remote_file(
         return Err(anyhow::anyhow!(install_error)).context("无法安装新远端文件，原文件已恢复");
     }
 
-    if let Err(cleanup_error) = sftp.remove_file(backup_path.clone()).await {
+    if let Err(cleanup_error) = remove_remote_tree(sftp, &backup_path).await {
         let remove_new = sftp.remove_file(destination_path.to_owned()).await;
         let restore_old = sftp
             .rename(backup_path.clone(), destination_path.to_owned())
@@ -908,6 +1265,95 @@ async fn commit_remote_file(
         bail!(
             "新文件已写入，但无法清理远端备份 {backup_path}（{cleanup_error}）；自动回滚也未完整完成"
         );
+    }
+    Ok(())
+}
+
+async fn commit_remote_directory(
+    sftp: &SftpSession,
+    temporary_path: &str,
+    destination_path: &str,
+    overwrite: bool,
+) -> Result<()> {
+    let destination_exists = sftp.try_exists(destination_path.to_owned()).await?;
+    if !destination_exists {
+        return sftp
+            .rename(temporary_path.to_owned(), destination_path.to_owned())
+            .await
+            .context("无法完成远端目录写入");
+    }
+    if !overwrite {
+        bail!("远端目标已存在；如需替换，请设置 overwrite=true");
+    }
+    let backup_path = format!("{destination_path}.kru-{}.backup", Uuid::new_v4().simple());
+    sftp.rename(destination_path.to_owned(), backup_path.clone())
+        .await
+        .context("无法暂存已有远端目录，原目录未改变")?;
+    if let Err(install_error) = sftp
+        .rename(temporary_path.to_owned(), destination_path.to_owned())
+        .await
+    {
+        if let Err(restore_error) = sftp
+            .rename(backup_path.clone(), destination_path.to_owned())
+            .await
+        {
+            bail!(
+                "无法安装新远端目录（{install_error}），也无法自动恢复原目录（{restore_error}）；原目录保留在 {backup_path}"
+            );
+        }
+        return Err(anyhow::anyhow!(install_error)).context("无法安装新远端目录，原目录已恢复");
+    }
+
+    if let Err(cleanup_error) = remove_remote_tree(sftp, &backup_path).await {
+        let remove_new = remove_remote_tree(sftp, destination_path).await;
+        let restore_old = sftp
+            .rename(backup_path.clone(), destination_path.to_owned())
+            .await;
+        if remove_new.is_ok() && restore_old.is_ok() {
+            return Err(cleanup_error).context("无法清理远端目录备份，新目录已撤销且原目录已恢复");
+        }
+        bail!(
+            "新目录已写入，但无法清理远端备份 {backup_path}（{cleanup_error}）；自动回滚也未完整完成"
+        );
+    }
+    Ok(())
+}
+
+async fn remove_remote_tree(sftp: &SftpSession, root: &str) -> Result<()> {
+    if !sftp.try_exists(root.to_owned()).await? {
+        return Ok(());
+    }
+    let metadata = sftp.symlink_metadata(root.to_owned()).await?;
+    if !metadata.file_type().is_dir() || metadata.file_type().is_symlink() {
+        return sftp
+            .remove_file(root.to_owned())
+            .await
+            .with_context(|| format!("无法删除远端文件 {root}"));
+    }
+
+    let mut stack = vec![(root.to_owned(), false)];
+    while let Some((path, visited)) = stack.pop() {
+        if visited {
+            sftp.remove_dir(path.clone())
+                .await
+                .with_context(|| format!("无法删除远端目录 {path}"))?;
+            continue;
+        }
+        stack.push((path.clone(), true));
+        for entry in sftp
+            .read_dir(path.clone())
+            .await
+            .with_context(|| format!("无法读取待删除的远端目录 {path}"))?
+        {
+            if entry.file_type().is_dir() && !entry.file_type().is_symlink() {
+                stack.push((entry.path(), false));
+            } else {
+                let entry_path = entry.path();
+                sftp.remove_file(entry_path.clone())
+                    .await
+                    .with_context(|| format!("无法删除远端文件 {entry_path}"))?;
+            }
+        }
     }
     Ok(())
 }
@@ -926,14 +1372,6 @@ async fn commit_local_file(
     if !overwrite {
         bail!("本地文件已存在；如需替换，请明确设置 overwrite=true");
     }
-    if !tokio::fs::symlink_metadata(destination_path)
-        .await?
-        .file_type()
-        .is_file()
-    {
-        bail!("本地目标已存在但不是普通文件，拒绝覆盖");
-    }
-
     let file_name = destination_path
         .file_name()
         .and_then(|name| name.to_str())
@@ -956,7 +1394,7 @@ async fn commit_local_file(
         return Err(install_error).context("无法安装新本地文件，原文件已恢复");
     }
 
-    if let Err(cleanup_error) = tokio::fs::remove_file(&backup_path).await {
+    if let Err(cleanup_error) = remove_local_path(&backup_path).await {
         let remove_new = tokio::fs::remove_file(destination_path).await;
         let restore_old = tokio::fs::rename(&backup_path, destination_path).await;
         if remove_new.is_ok() && restore_old.is_ok() {
@@ -966,6 +1404,65 @@ async fn commit_local_file(
             "新文件已写入，但无法清理本地备份 {}（{cleanup_error}）；自动回滚也未完整完成",
             backup_path.display()
         );
+    }
+    Ok(())
+}
+
+async fn commit_local_directory(
+    temporary_path: &Path,
+    destination_path: &Path,
+    overwrite: bool,
+) -> Result<()> {
+    let destination_exists = tokio::fs::try_exists(destination_path).await?;
+    if !destination_exists {
+        return tokio::fs::rename(temporary_path, destination_path)
+            .await
+            .context("无法完成本地目录写入");
+    }
+    if !overwrite {
+        bail!("本地目标已存在；如需替换，请设置 overwrite=true");
+    }
+    let directory_name = destination_path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or("download");
+    let backup_path = destination_path.with_file_name(format!(
+        ".{directory_name}.kru-{}.backup",
+        Uuid::new_v4().simple()
+    ));
+    tokio::fs::rename(destination_path, &backup_path)
+        .await
+        .context("无法暂存已有本地目录，原目录未改变")?;
+    if let Err(install_error) = tokio::fs::rename(temporary_path, destination_path).await {
+        if let Err(restore_error) = tokio::fs::rename(&backup_path, destination_path).await {
+            bail!(
+                "无法安装新本地目录（{install_error}），也无法自动恢复原目录（{restore_error}）；原目录保留在 {}",
+                backup_path.display()
+            );
+        }
+        return Err(install_error).context("无法安装新本地目录，原目录已恢复");
+    }
+
+    if let Err(cleanup_error) = remove_local_path(&backup_path).await {
+        let remove_new = tokio::fs::remove_dir_all(destination_path).await;
+        let restore_old = tokio::fs::rename(&backup_path, destination_path).await;
+        if remove_new.is_ok() && restore_old.is_ok() {
+            return Err(cleanup_error).context("无法清理本地目录备份，新目录已撤销且原目录已恢复");
+        }
+        bail!(
+            "新目录已写入，但无法清理本地备份 {}（{cleanup_error}）；自动回滚也未完整完成",
+            backup_path.display()
+        );
+    }
+    Ok(())
+}
+
+async fn remove_local_path(path: &Path) -> Result<()> {
+    let file_type = tokio::fs::symlink_metadata(path).await?.file_type();
+    if file_type.is_dir() && !file_type.is_symlink() {
+        tokio::fs::remove_dir_all(path).await?;
+    } else {
+        tokio::fs::remove_file(path).await?;
     }
     Ok(())
 }
@@ -997,12 +1494,23 @@ pub async fn test_connection(vault: &Vault, connection: &DecryptedConnection) ->
             stored: connection.stored.clone(),
             secrets: connection.secrets.clone(),
         };
-        let result = execute_ssh(vault, &testable, "printf 'mcp-vault-ok'", None, Some(30)).await?;
+        let result = execute_ssh(
+            vault,
+            &testable,
+            "printf 'mcp-vault-ok'",
+            None,
+            Some(30),
+            &HashMap::new(),
+            None,
+        )
+        .await?;
         if result.stdout != "mcp-vault-ok" {
             bail!("VPS 返回了意外结果：{}", result.stderr);
         }
         Ok("SSH 连接成功".to_owned())
-    } else {
+    } else if connection.stored.has_capability("http")
+        && !connection.stored.base_url.trim().is_empty()
+    {
         let mut base = Url::parse(&connection.stored.base_url).context("API URL 无效")?;
         if !base.path().ends_with('/') {
             base.set_path(&format!("{}/", base.path()));
@@ -1028,6 +1536,8 @@ pub async fn test_connection(vault: &Vault, connection: &DecryptedConnection) ->
         )
         .await?;
         Ok(format!("API 已响应：HTTP {}", result.status))
+    } else {
+        bail!("该项目没有可自动测试的连接目标")
     }
 }
 
@@ -1239,24 +1749,8 @@ fn ssh_connect_error_message(error: &impl Display) -> String {
     format!("SSH 连接或握手失败：{raw}")
 }
 
-fn shell_quote(value: &str) -> String {
+pub(crate) fn shell_quote(value: &str) -> String {
     format!("'{}'", value.replace('\'', "'\\''"))
-}
-
-fn append_limited(target: &mut Vec<u8>, chunk: &[u8], truncated: &mut bool, limit: usize) {
-    let remaining = limit.saturating_sub(target.len());
-    target.extend_from_slice(&chunk[..chunk.len().min(remaining)]);
-    if chunk.len() > remaining {
-        *truncated = true;
-    }
-}
-
-fn with_truncation_marker(bytes: Vec<u8>, truncated: bool) -> String {
-    let mut text = String::from_utf8_lossy(&bytes).into_owned();
-    if truncated {
-        text.push_str("\n…[结果已截断]");
-    }
-    text
 }
 
 #[cfg(test)]
@@ -1272,6 +1766,7 @@ mod tests {
         routing::{get, post},
     };
     use chrono::Utc;
+    use tempfile::tempdir;
     use uuid::Uuid;
 
     fn stored(base_url: String) -> StoredConnection {
@@ -1315,19 +1810,23 @@ mod tests {
         }
     }
 
-    #[test]
-    fn limited_output_marks_only_actual_overflow() {
-        let mut exact = Vec::new();
-        let mut exact_truncated = false;
-        append_limited(&mut exact, b"1234", &mut exact_truncated, 4);
-        assert!(!exact_truncated);
-        assert_eq!(with_truncation_marker(exact, exact_truncated), "1234");
-
-        let mut overflow = Vec::new();
-        let mut overflow_truncated = false;
-        append_limited(&mut overflow, b"12345", &mut overflow_truncated, 4);
-        assert!(overflow_truncated);
-        assert!(with_truncation_marker(overflow, overflow_truncated).contains("[结果已截断]"));
+    #[tokio::test]
+    async fn fill_only_item_does_not_offer_a_fake_connection_test() {
+        let directory = tempdir().unwrap();
+        let vault = Vault::open(directory.path().join("vault")).unwrap();
+        let mut stored = stored(String::new());
+        stored.capabilities = vec!["fill".to_owned()];
+        let connection = DecryptedConnection {
+            stored,
+            secrets: SecretBundle::default(),
+        };
+        assert_eq!(
+            test_connection(&vault, &connection)
+                .await
+                .unwrap_err()
+                .to_string(),
+            "该项目没有可自动测试的连接目标"
+        );
     }
 
     #[test]
@@ -1395,13 +1894,53 @@ mod tests {
         let directory_temporary = directory.path().join("directory.part");
         std::fs::create_dir(&directory_destination).unwrap();
         std::fs::write(&directory_temporary, "must-not-replace-directory").unwrap();
+        commit_local_file(&directory_temporary, &directory_destination, true)
+            .await
+            .unwrap();
+        assert_eq!(
+            std::fs::read_to_string(&directory_destination).unwrap(),
+            "must-not-replace-directory"
+        );
+        assert!(!directory_temporary.exists());
+
+        let mixed_directory_temporary = directory.path().join("mixed-directory.part");
+        std::fs::create_dir(&mixed_directory_temporary).unwrap();
+        std::fs::write(mixed_directory_temporary.join("new.txt"), "directory-wins").unwrap();
+        commit_local_directory(&mixed_directory_temporary, &directory_destination, true)
+            .await
+            .unwrap();
+        assert!(directory_destination.is_dir());
+        assert_eq!(
+            std::fs::read_to_string(directory_destination.join("new.txt")).unwrap(),
+            "directory-wins"
+        );
+
+        let existing_tree = directory.path().join("existing-tree");
+        let replacement_tree = directory.path().join("replacement-tree.part");
+        std::fs::create_dir(&existing_tree).unwrap();
+        std::fs::write(existing_tree.join("old.txt"), "old-tree").unwrap();
+        std::fs::create_dir(&replacement_tree).unwrap();
+        std::fs::create_dir(replacement_tree.join("nested")).unwrap();
+        std::fs::write(replacement_tree.join("nested/new.txt"), "new-tree").unwrap();
+
         assert!(
-            commit_local_file(&directory_temporary, &directory_destination, true)
+            commit_local_directory(&replacement_tree, &existing_tree, false)
                 .await
                 .is_err()
         );
-        assert!(directory_destination.is_dir());
-        assert!(directory_temporary.is_file());
+        assert_eq!(
+            std::fs::read_to_string(existing_tree.join("old.txt")).unwrap(),
+            "old-tree"
+        );
+        commit_local_directory(&replacement_tree, &existing_tree, true)
+            .await
+            .unwrap();
+        assert!(!existing_tree.join("old.txt").exists());
+        assert_eq!(
+            std::fs::read_to_string(existing_tree.join("nested/new.txt")).unwrap(),
+            "new-tree"
+        );
+        assert!(!replacement_tree.exists());
     }
 
     #[tokio::test]
@@ -1415,10 +1954,7 @@ mod tests {
                 .get("cookie")
                 .and_then(|value| value.to_str().ok())
                 .unwrap_or_default();
-            format!(
-                "auth={auth}\ncookie={cookie}\n{}",
-                "x".repeat(DEFAULT_API_RESULT_LENGTH + 100)
-            )
+            format!("auth={auth}\ncookie={cookie}\n{}", "x".repeat(1_048_676))
         }
 
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -1457,15 +1993,30 @@ mod tests {
         assert!(!result.body.contains("attacker-value"));
         assert!(result.body.contains("[REDACTED]"));
         assert!(result.body.contains("cookie=session=attacker"));
-        assert!(result.body.contains("[结果已截断]"));
-        assert!(result.truncated);
+        assert!(!result.body.contains("[结果已截断]"));
+        assert!(!result.truncated);
+        assert!(result.body.len() > 1_048_576);
+
+        let limited = execute_api(
+            &connection,
+            ApiRequestInput {
+                url: format!("http://{address}/v1/echo"),
+                method: "GET".into(),
+                max_response_bytes: Some(1_024),
+                ..ApiRequestInput::default()
+            },
+        )
+        .await
+        .unwrap();
+        assert!(limited.body.contains("[结果已截断]"));
+        assert!(limited.truncated);
         server.abort();
     }
 
     #[tokio::test]
     async fn api_streams_large_responses_to_a_safe_local_file() {
         async fn artifact() -> Vec<u8> {
-            vec![b'Z'; DEFAULT_API_RESULT_LENGTH + 100_000]
+            vec![b'Z'; 1_148_576]
         }
 
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -1493,14 +2044,8 @@ mod tests {
         let result = execute_api(&connection, request()).await.unwrap();
         assert_eq!(result.body, "");
         assert!(!result.truncated);
-        assert_eq!(
-            result.bytes_transferred,
-            Some((DEFAULT_API_RESULT_LENGTH + 100_000) as u64)
-        );
-        assert_eq!(
-            std::fs::metadata(&destination).unwrap().len(),
-            (DEFAULT_API_RESULT_LENGTH + 100_000) as u64
-        );
+        assert_eq!(result.bytes_transferred, Some(1_148_576));
+        assert_eq!(std::fs::metadata(&destination).unwrap().len(), 1_148_576);
         assert!(
             result
                 .saved_to
@@ -1519,27 +2064,36 @@ mod tests {
         )
         .await
         .unwrap();
-        assert_eq!(
-            overwritten.bytes_transferred,
-            Some((DEFAULT_API_RESULT_LENGTH + 100_000) as u64)
-        );
+        assert_eq!(overwritten.bytes_transferred, Some(1_148_576));
         assert_eq!(std::fs::read(&destination).unwrap()[0], b'Z');
         server.abort();
     }
 
     #[tokio::test]
-    async fn api_follows_same_origin_redirects_and_reports_the_final_url() {
+    async fn api_follows_redirects_and_reports_the_final_url() {
+        let final_listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let final_address = final_listener.local_addr().unwrap();
+        let final_server = tokio::spawn(async move {
+            axum::serve(
+                final_listener,
+                Router::new().route("/v1/final", get(|| async { "redirect-complete" })),
+            )
+            .await
+            .unwrap();
+        });
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let address = listener.local_addr().unwrap();
+        let redirect_url = format!("http://{final_address}/v1/final");
         let server = tokio::spawn(async move {
             axum::serve(
                 listener,
-                Router::new()
-                    .route(
-                        "/v1/start",
-                        get(|| async { Redirect::temporary("/v1/final") }),
-                    )
-                    .route("/v1/final", get(|| async { "redirect-complete" })),
+                Router::new().route(
+                    "/v1/start",
+                    get(move || {
+                        let redirect_url = redirect_url.clone();
+                        async move { Redirect::temporary(&redirect_url) }
+                    }),
+                ),
             )
             .await
             .unwrap();
@@ -1564,8 +2118,9 @@ mod tests {
 
         assert_eq!(result.status, 200);
         assert_eq!(result.body, "redirect-complete");
-        assert!(result.url.ends_with("/v1/final"));
+        assert_eq!(result.url, format!("http://{final_address}/v1/final"));
         server.abort();
+        final_server.abort();
     }
 
     #[tokio::test]
@@ -1684,6 +2239,24 @@ mod tests {
         .await
         .unwrap();
         assert!(raw_result.body.contains("raw-binary-marker-9384"));
+
+        let mut text_headers = HashMap::new();
+        text_headers.insert("Content-Type".into(), "text/plain; charset=utf-8".into());
+        let text_result = execute_api(
+            &connection,
+            ApiRequestInput {
+                url: url.clone(),
+                method: "POST".into(),
+                headers: text_headers,
+                body: Some(Value::String("plain-text-marker-9384".into())),
+                max_response_bytes: Some(32 * 1024 * 1024),
+                ..ApiRequestInput::default()
+            },
+        )
+        .await
+        .unwrap();
+        assert!(text_result.body.contains("text/plain"));
+        assert!(text_result.body.contains("plain-text-marker-9384"));
 
         let directory = tempfile::tempdir().unwrap();
         let file_path = directory.path().join("upload.txt");
@@ -1837,5 +2410,26 @@ mod tests {
         assert!(ssh_connect_error_message(&"Disconnected").contains("握手"));
         assert!(ssh_connect_error_message(&"os error 10060").contains("TCP"));
         assert!(ssh_connect_error_message(&"connection refused").contains("端口"));
+    }
+
+    #[test]
+    fn ssh_secret_environment_quotes_values_and_rejects_invalid_names() {
+        let command = ssh_command_with_secret_environment(
+            "printf '%s' \"$KRU_PASSWORD\"",
+            &HashMap::from([(
+                "KRU_PASSWORD".to_owned(),
+                "value with ' quotes and $shell".to_owned(),
+            )]),
+        )
+        .unwrap();
+        assert!(command.starts_with("KRU_PASSWORD='value with '\\'' quotes and $shell' sh -c "));
+        assert!(command.contains("$KRU_PASSWORD"));
+        assert!(
+            ssh_command_with_secret_environment(
+                "true",
+                &HashMap::from([("NOT-VALID".to_owned(), "secret".to_owned())]),
+            )
+            .is_err()
+        );
     }
 }

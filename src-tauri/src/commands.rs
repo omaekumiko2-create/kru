@@ -17,7 +17,7 @@ use std::{
     path::PathBuf,
     process::Command,
     sync::atomic::{AtomicBool, Ordering},
-    time::{Duration, Instant},
+    time::Instant,
 };
 use tauri::{
     AppHandle, Emitter, LogicalSize, Manager, State, WebviewWindow,
@@ -43,10 +43,9 @@ pub struct AppRuntime {
 
 #[derive(Default)]
 struct OwnerSession {
-    unlocked_until: Option<Instant>,
+    unlocked: bool,
 }
 
-const OWNER_SESSION_DURATION: Duration = Duration::from_secs(10 * 60);
 const WINDOW_LOGICAL_WIDTH: f64 = 460.0;
 const WINDOW_LOGICAL_HEIGHT: f64 = 690.0;
 
@@ -57,25 +56,17 @@ async fn owner_lock_state(runtime: &AppRuntime) -> Result<OwnerLockState, String
         .map_err(command_error)?;
     let mut session = runtime.owner_session.lock().await;
     if !pin_configured {
-        session.unlocked_until = None;
+        session.unlocked = false;
         return Ok(OwnerLockState {
             pin_configured,
             unlocked: true,
             expires_in_seconds: 0,
         });
     }
-    let expires_in_seconds = session
-        .unlocked_until
-        .and_then(|until| until.checked_duration_since(Instant::now()))
-        .map(|remaining| remaining.as_secs())
-        .unwrap_or(0);
-    if expires_in_seconds == 0 {
-        session.unlocked_until = None;
-    }
     Ok(OwnerLockState {
         pin_configured,
-        unlocked: pin_configured && expires_in_seconds > 0,
-        expires_in_seconds,
+        unlocked: session.unlocked,
+        expires_in_seconds: 0,
     })
 }
 
@@ -87,9 +78,8 @@ async fn require_owner_unlocked(runtime: &AppRuntime) -> Result<(), String> {
     }
 }
 
-async fn extend_owner_session(runtime: &AppRuntime) {
-    runtime.owner_session.lock().await.unlocked_until =
-        Some(Instant::now() + OWNER_SESSION_DURATION);
+async fn keep_owner_unlocked(runtime: &AppRuntime) {
+    runtime.owner_session.lock().await.unlocked = true;
 }
 
 fn command_error(error: impl std::fmt::Display) -> String {
@@ -121,7 +111,7 @@ async fn owner_set_pin(
     pin: String,
 ) -> Result<OwnerLockState, String> {
     runtime.vault.set_owner_pin(&pin).map_err(command_error)?;
-    extend_owner_session(&runtime).await;
+    keep_owner_unlocked(&runtime).await;
     owner_lock_state(&runtime).await
 }
 
@@ -129,7 +119,7 @@ async fn owner_set_pin(
 async fn owner_disable_pin(runtime: State<'_, AppRuntime>) -> Result<OwnerLockState, String> {
     require_owner_unlocked(&runtime).await?;
     runtime.vault.disable_owner_pin().map_err(command_error)?;
-    runtime.owner_session.lock().await.unlocked_until = None;
+    runtime.owner_session.lock().await.unlocked = false;
     owner_lock_state(&runtime).await
 }
 
@@ -145,20 +135,13 @@ async fn owner_unlock(
     {
         return Err("PIN 不正确".to_owned());
     }
-    extend_owner_session(&runtime).await;
-    owner_lock_state(&runtime).await
-}
-
-#[tauri::command]
-async fn owner_touch(runtime: State<'_, AppRuntime>) -> Result<OwnerLockState, String> {
-    require_owner_unlocked(&runtime).await?;
-    extend_owner_session(&runtime).await;
+    keep_owner_unlocked(&runtime).await;
     owner_lock_state(&runtime).await
 }
 
 #[tauri::command]
 async fn owner_lock(runtime: State<'_, AppRuntime>) -> Result<OwnerLockState, String> {
-    runtime.owner_session.lock().await.unlocked_until = None;
+    runtime.owner_session.lock().await.unlocked = false;
     owner_lock_state(&runtime).await
 }
 
@@ -168,7 +151,7 @@ async fn owner_secret_view(
     id: Uuid,
 ) -> Result<OwnerSecretView, String> {
     require_owner_unlocked(&runtime).await?;
-    extend_owner_session(&runtime).await;
+    keep_owner_unlocked(&runtime).await;
     runtime.vault.owner_secret_view(id).map_err(command_error)
 }
 
@@ -177,7 +160,7 @@ async fn owner_editor_drafts(
     runtime: State<'_, AppRuntime>,
 ) -> Result<Vec<OwnerEditorDraft>, String> {
     require_owner_unlocked(&runtime).await?;
-    extend_owner_session(&runtime).await;
+    keep_owner_unlocked(&runtime).await;
     runtime.vault.list_editor_drafts().map_err(command_error)
 }
 
@@ -188,7 +171,7 @@ async fn save_editor_draft(
     mut input: ConnectionInput,
 ) -> Result<OwnerEditorDraft, String> {
     require_owner_unlocked(&runtime).await?;
-    extend_owner_session(&runtime).await;
+    keep_owner_unlocked(&runtime).await;
     if input.private_key_import_path == "pending" {
         let path = runtime
             .pending_private_key
@@ -196,10 +179,6 @@ async fn save_editor_draft(
             .await
             .take()
             .ok_or_else(|| "请重新选择 SSH 私钥".to_owned())?;
-        let metadata = std::fs::metadata(&path).map_err(command_error)?;
-        if metadata.len() > 1_048_576 {
-            return Err("SSH 私钥文件不能超过 1 MB".to_owned());
-        }
         input.secrets.private_key = Some(std::fs::read_to_string(&path).map_err(command_error)?);
         input.secrets.private_key_name = path
             .file_name()
@@ -226,7 +205,7 @@ async fn copy_owner_value(
     value: String,
 ) -> Result<(), String> {
     require_owner_unlocked(&runtime).await?;
-    extend_owner_session(&runtime).await;
+    keep_owner_unlocked(&runtime).await;
     app.clipboard().write_text(&value).map_err(command_error)
 }
 
@@ -425,19 +404,6 @@ async fn agent_mcp_remove(
 }
 
 #[tauri::command]
-async fn complete_agent_onboarding(
-    app: AppHandle,
-    runtime: State<'_, AppRuntime>,
-) -> Result<(), String> {
-    runtime
-        .vault
-        .complete_agent_mcp_onboarding()
-        .map_err(command_error)?;
-    emit_changed(&app);
-    Ok(())
-}
-
-#[tauri::command]
 async fn choose_private_key(
     app: AppHandle,
     runtime: State<'_, AppRuntime>,
@@ -452,10 +418,6 @@ async fn choose_private_key(
         return Ok(None);
     };
     let path = path.into_path().map_err(command_error)?;
-    let metadata = std::fs::metadata(&path).map_err(command_error)?;
-    if metadata.len() > 1_048_576 {
-        return Err("SSH 私钥文件不能超过 1 MB".to_owned());
-    }
     let name = path
         .file_name()
         .and_then(|name| name.to_str())
@@ -653,10 +615,7 @@ async fn window_action(
     action: String,
 ) -> Result<(), String> {
     match action.as_str() {
-        "minimize" => {
-            runtime.owner_session.lock().await.unlocked_until = None;
-            window.minimize().map_err(command_error)
-        }
+        "minimize" => window.minimize().map_err(command_error),
         "close" => {
             let tray_available = runtime.tray_available.load(Ordering::Acquire);
             if !tray_available {
@@ -672,7 +631,6 @@ async fn window_action(
                 window.app_handle().exit(0);
                 Ok(())
             } else {
-                runtime.owner_session.lock().await.unlocked_until = None;
                 window.hide().map_err(command_error)
             }
         }
@@ -722,7 +680,7 @@ fn install_tray(app: &tauri::App) -> Result<()> {
                         .owner_session
                         .lock()
                         .await
-                        .unlocked_until = None;
+                        .unlocked = false;
                     show_main_window(&handle);
                     if matches!(pin_configured, Ok(false)) {
                         let _ = handle.emit("pin-setup-requested", ());
@@ -792,6 +750,7 @@ pub fn run_gui() -> Result<()> {
             let executable = mcp::launcher_executable()?.to_string_lossy().into_owned();
             let browser = BrowserBridge::new(vault.clone());
             let agent_registry = AgentRegistry::new(PathBuf::from(&executable))?;
+            agent_registry.refresh_managed_instructions();
             app.manage(AppRuntime {
                 _gui_instance: gui_instance,
                 vault,
@@ -850,16 +809,7 @@ pub fn run_gui() -> Result<()> {
                     runtime.tray_available.load(Ordering::Acquire),
                 ) {
                     api.prevent_close();
-                    let app = window.app_handle().clone();
-                    let window = window.clone();
-                    tauri::async_runtime::spawn(async move {
-                        app.state::<AppRuntime>()
-                            .owner_session
-                            .lock()
-                            .await
-                            .unlocked_until = None;
-                        let _ = window.hide();
-                    });
+                    let _ = window.hide();
                 } else if let Err(error) =
                     crate::runtime_epoch::invalidate(runtime.vault.data_dir())
                 {
@@ -873,7 +823,6 @@ pub fn run_gui() -> Result<()> {
             owner_set_pin,
             owner_disable_pin,
             owner_unlock,
-            owner_touch,
             owner_lock,
             owner_secret_view,
             owner_editor_drafts,
@@ -894,7 +843,6 @@ pub fn run_gui() -> Result<()> {
             agent_mcp_register,
             agent_mcp_repair,
             agent_mcp_remove,
-            complete_agent_onboarding,
             choose_private_key,
             quick_pair_browser,
             reset_browser_pairing,

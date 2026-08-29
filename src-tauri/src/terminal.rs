@@ -1,4 +1,4 @@
-use crate::policy::redaction_candidates;
+use crate::{policy::redaction_candidates, storage::resolve_user_path};
 use anyhow::{Context, Result, bail};
 use portable_pty::{Child, CommandBuilder, MasterPty, PtySize, native_pty_system};
 use schemars::JsonSchema;
@@ -11,13 +11,8 @@ use std::{
         Arc, Mutex,
         atomic::{AtomicBool, Ordering},
     },
-    time::Instant,
 };
 use uuid::Uuid;
-
-const MAX_SESSIONS: usize = 8;
-const MAX_OUTPUT: usize = 1_048_576;
-const MAX_INPUT: usize = 1_048_576;
 
 #[derive(Debug, Clone, Serialize, JsonSchema)]
 #[serde(rename_all = "camelCase")]
@@ -39,16 +34,11 @@ pub struct TerminalReadResult {
 #[derive(Default)]
 struct OutputBuffer {
     bytes: VecDeque<u8>,
-    truncated: bool,
 }
 
 impl OutputBuffer {
     fn push(&mut self, bytes: &[u8]) {
         self.bytes.extend(bytes);
-        while self.bytes.len() > MAX_OUTPUT {
-            self.bytes.pop_front();
-            self.truncated = true;
-        }
     }
 
     fn take_redacted(&mut self, candidates: &[String], running: bool) -> (String, bool) {
@@ -76,8 +66,7 @@ impl OutputBuffer {
             cursor += 1;
         }
         self.bytes.extend(&source[cursor..]);
-        let truncated = std::mem::take(&mut self.truncated);
-        (String::from_utf8_lossy(&output).into_owned(), truncated)
+        (String::from_utf8_lossy(&output).into_owned(), false)
     }
 }
 
@@ -87,7 +76,6 @@ struct TerminalSession {
     child: Mutex<Box<dyn Child + Send + Sync>>,
     output: Arc<Mutex<OutputBuffer>>,
     secrets: Mutex<Vec<String>>,
-    created_at: Instant,
     reader_done: Arc<AtomicBool>,
 }
 
@@ -140,28 +128,33 @@ impl TerminalManager {
         args: Vec<String>,
         cwd: Option<String>,
     ) -> Result<TerminalOpenResult> {
-        if program.trim().is_empty() || program.chars().count() > 1_024 {
+        self.open_with_env(program, args, cwd, HashMap::new(), Vec::new())
+    }
+
+    pub fn open_with_env(
+        &self,
+        program: &str,
+        args: Vec<String>,
+        cwd: Option<String>,
+        environment: HashMap<String, String>,
+        redacted_values: Vec<String>,
+    ) -> Result<TerminalOpenResult> {
+        if program.trim().is_empty() {
             bail!("程序名称无效");
         }
         if args.iter().any(|arg| arg.contains('\0')) {
             bail!("终端参数不能包含空字符");
         }
-        let cwd = normalize_cwd(cwd)?;
-        let resolved = resolve_executable(program.trim(), cwd.as_deref())?;
-        {
-            let sessions = self.sessions.lock().map_err(lock_error)?;
-            if sessions.len() >= MAX_SESSIONS {
-                drop(sessions);
-                // Only reclaim at the hard cap. A process exit can race with the
-                // PTY reader's final write, so a session is not eligible until
-                // that reader has also finished.
-                self.reap_finished_session()?;
-                if self.sessions.lock().map_err(lock_error)?.len() >= MAX_SESSIONS {
-                    bail!("同时最多打开 {MAX_SESSIONS} 个终端会话");
-                }
+        for (name, value) in &environment {
+            if name.is_empty() || name.contains('=') || name.contains('\0') {
+                bail!("环境变量名称无效");
+            }
+            if value.contains('\0') {
+                bail!("环境变量值不能包含空字符");
             }
         }
-
+        let cwd = normalize_cwd(cwd)?;
+        let resolved = resolve_executable(program.trim(), cwd.as_deref())?;
         let pty_system = native_pty_system();
         let pair = pty_system
             .openpty(PtySize {
@@ -174,6 +167,9 @@ impl TerminalManager {
         let mut command = CommandBuilder::new(&resolved.executable);
         command.args(resolved.prefix_args);
         command.args(args);
+        for (name, value) in environment {
+            command.env(name, value);
+        }
         #[cfg(windows)]
         if is_windows_powershell(&resolved.executable) {
             // PowerShell 5.1 builds its own Windows module path when this
@@ -243,8 +239,7 @@ impl TerminalManager {
                 writer,
                 child: Mutex::new(child),
                 output,
-                secrets: Mutex::new(Vec::new()),
-                created_at: Instant::now(),
+                secrets: Mutex::new(redacted_values),
                 reader_done,
             }),
         );
@@ -255,10 +250,27 @@ impl TerminalManager {
     }
 
     pub fn input(&self, session_id: Uuid, text: &str) -> Result<()> {
-        if text.len() > MAX_INPUT || text.contains('\0') {
-            bail!("终端输入过长或包含空字符");
+        self.input_redacted(session_id, text, &[])
+    }
+
+    pub fn input_redacted(
+        &self,
+        session_id: Uuid,
+        text: &str,
+        redacted_values: &[String],
+    ) -> Result<()> {
+        if text.contains('\0') {
+            bail!("终端输入不能包含空字符");
         }
         let session = self.session(session_id)?;
+        if !redacted_values.is_empty() {
+            let mut secrets = session.secrets.lock().map_err(lock_error)?;
+            for value in redacted_values {
+                if !secrets.iter().any(|secret| secret == value) {
+                    secrets.push(value.clone());
+                }
+            }
+        }
         let mut writer = session.writer.lock().map_err(lock_error)?;
         let writer = writer.as_mut().context("终端会话已经结束")?;
         writer
@@ -268,28 +280,41 @@ impl TerminalManager {
     }
 
     pub fn fill_value(&self, session_id: Uuid, value: &str, submit: bool) -> Result<()> {
-        let session = self.session(session_id)?;
-        if value.len() > MAX_INPUT || value.contains('\0') {
-            bail!("秘密字段过长或包含空字符，无法写入终端");
+        if value.contains('\0') {
+            bail!("秘密字段包含空字符，无法写入终端");
         }
-        {
-            let mut secrets = session.secrets.lock().map_err(lock_error)?;
-            if !secrets.iter().any(|secret| secret == value) {
-                secrets.push(value.to_owned());
-            }
-        }
-        let mut writer = session.writer.lock().map_err(lock_error)?;
-        let writer = writer.as_mut().context("终端会话已经结束")?;
-        writer
-            .write_all(value.as_bytes())
-            .context("无法将凭据写入终端")?;
+        let mut text = value.to_owned();
         if submit {
             #[cfg(windows)]
-            writer.write_all(b"\r\n").context("无法提交终端凭据")?;
+            text.push_str("\r\n");
             #[cfg(not(windows))]
-            writer.write_all(b"\n").context("无法提交终端凭据")?;
+            text.push('\n');
         }
-        writer.flush().context("无法刷新终端凭据")
+        self.input_redacted(session_id, &text, &[value.to_owned()])
+            .context("无法将凭据写入终端")
+    }
+
+    pub fn is_running(&self, session_id: Uuid) -> Result<bool> {
+        let session = self.session(session_id)?;
+        let running = session
+            .child
+            .lock()
+            .map_err(lock_error)?
+            .try_wait()
+            .context("无法读取终端进程状态")?
+            .is_none();
+        if !running {
+            session.close_pty_io();
+        }
+        Ok(running)
+    }
+
+    pub fn contains(&self, session_id: Uuid) -> Result<bool> {
+        Ok(self
+            .sessions
+            .lock()
+            .map_err(lock_error)?
+            .contains_key(&session_id))
     }
 
     pub fn read(&self, session_id: Uuid) -> Result<TerminalReadResult> {
@@ -345,64 +370,15 @@ impl TerminalManager {
             .cloned()
             .context("找不到终端会话；会话只在创建它的 MCP 连接中有效")
     }
-
-    fn reap_finished_session(&self) -> Result<()> {
-        let mut sessions = self.sessions.lock().map_err(lock_error)?;
-        let mut exited_sessions = Vec::new();
-        for (id, session) in sessions.iter() {
-            let exited = session
-                .child
-                .lock()
-                .map_err(lock_error)?
-                .try_wait()
-                .context("无法回收已结束的终端会话")?
-                .is_some();
-            if exited {
-                session.close_pty_io();
-                exited_sessions.push((*id, session.clone()));
-            }
-        }
-
-        // Closing the final PTY handles releases a blocked reader. Give it a
-        // short bounded window to flush the last bytes before choosing a victim.
-        let reader_deadline = Instant::now() + std::time::Duration::from_millis(50);
-        while !exited_sessions.is_empty()
-            && !exited_sessions
-                .iter()
-                .any(|(_, session)| session.reader_done.load(Ordering::Acquire))
-            && Instant::now() < reader_deadline
-        {
-            std::thread::sleep(std::time::Duration::from_millis(1));
-        }
-
-        let mut oldest_drained = None;
-        let mut oldest_unread = None;
-        for (id, session) in exited_sessions {
-            if !session.reader_done.load(Ordering::Acquire) {
-                continue;
-            }
-            if session.output.lock().map_err(lock_error)?.bytes.is_empty() {
-                if oldest_drained.is_none_or(|(_, created_at)| session.created_at < created_at) {
-                    oldest_drained = Some((id, session.created_at));
-                }
-            } else if oldest_unread.is_none_or(|(_, created_at)| session.created_at < created_at) {
-                oldest_unread = Some((id, session.created_at));
-            }
-        }
-        if let Some((id, _)) = oldest_drained.or(oldest_unread) {
-            sessions.remove(&id);
-        }
-        Ok(())
-    }
 }
 
 fn normalize_cwd(cwd: Option<String>) -> Result<Option<PathBuf>> {
     let Some(cwd) = cwd.filter(|value| !value.trim().is_empty()) else {
         return Ok(None);
     };
-    let cwd = PathBuf::from(cwd.trim());
-    if !cwd.is_absolute() || !cwd.is_dir() {
-        bail!("终端工作目录必须是存在的绝对路径");
+    let cwd = resolve_user_path(&cwd)?;
+    if !cwd.is_dir() {
+        bail!("终端工作目录不存在或不是目录");
     }
     Ok(Some(cwd))
 }
@@ -558,18 +534,12 @@ mod tests {
     use std::time::{Duration, Instant};
 
     #[test]
-    fn output_buffer_keeps_medium_bursts_and_reports_real_overflow() {
-        let mut medium = OutputBuffer::default();
-        medium.push(&vec![b'A'; 220_000]);
-        let (output, truncated) = medium.take_redacted(&[], false);
-        assert_eq!(output.len(), 220_000);
-        assert!(!truncated);
-
+    fn output_buffer_keeps_all_unread_output() {
         let mut large = OutputBuffer::default();
-        large.push(&vec![b'B'; MAX_OUTPUT + 1]);
+        large.push(&vec![b'B'; 2 * 1_048_576]);
         let (output, truncated) = large.take_redacted(&[], false);
-        assert_eq!(output.len(), MAX_OUTPUT);
-        assert!(truncated);
+        assert_eq!(output.len(), 2 * 1_048_576);
+        assert!(!truncated);
     }
 
     #[test]
@@ -730,55 +700,18 @@ mod tests {
     }
 
     #[test]
-    fn terminal_capacity_reclaims_the_oldest_finished_unread_session() {
+    fn more_than_eight_terminal_sessions_can_coexist() {
         let manager = TerminalManager::new();
         let mut sessions = Vec::new();
-        for index in 0..MAX_SESSIONS {
-            let marker = format!("KRU-FINISHED-{index}");
-            let (program, args) = output_command(&marker);
+        for _ in 0..10 {
+            let (program, args) = silent_command();
             let session = manager.open(&program, args, None).unwrap();
-            wait_for_exit_with_unread_output(&manager, session.session_id, Duration::from_secs(2));
             sessions.push(session.session_id);
         }
-
-        let (program, args) = silent_command();
-        let replacement = manager.open(&program, args, None).unwrap();
-        assert!(manager.session(sessions[0]).is_err());
-        assert!(manager.session(sessions[1]).is_ok());
-
-        for id in sessions.into_iter().skip(1) {
+        assert_eq!(manager.sessions.lock().unwrap().len(), 10);
+        for id in sessions {
             manager.close(id).unwrap();
         }
-        manager.close(replacement.session_id).unwrap();
-    }
-
-    #[test]
-    fn terminal_capacity_does_not_reclaim_before_the_pty_reader_finishes() {
-        let manager = TerminalManager::new();
-        let mut sessions = Vec::new();
-        for index in 0..MAX_SESSIONS {
-            let marker = format!("KRU-READER-{index}");
-            let (program, args) = output_command(&marker);
-            let session = manager.open(&program, args, None).unwrap();
-            wait_for_exit_with_unread_output(&manager, session.session_id, Duration::from_secs(2));
-            sessions.push(session.session_id);
-        }
-        manager
-            .session(sessions[0])
-            .unwrap()
-            .reader_done
-            .store(false, Ordering::Release);
-
-        let (program, args) = silent_command();
-        let replacement = manager.open(&program, args, None).unwrap();
-        assert!(manager.session(sessions[0]).is_ok());
-        assert!(manager.session(sessions[1]).is_err());
-
-        manager.close(sessions[0]).unwrap();
-        for id in sessions.into_iter().skip(2) {
-            manager.close(id).unwrap();
-        }
-        manager.close(replacement.session_id).unwrap();
     }
 
     #[test]

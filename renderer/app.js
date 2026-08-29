@@ -49,7 +49,7 @@ const staticCopy = [
   ['#launch-at-login-option strong', 'text', '开机自启动', 'LAUNCH AT LOGIN'],
   ['#launch-at-login-option small', 'text', '登录系统后自动启动 KRU，并保持单实例', 'Start KRU after sign-in while preserving single-instance behavior.'],
   ['[data-module="MCP / 02"] .settings-heading h2', 'text', 'Agent 接入', 'AGENT SETUP'],
-  ['[data-module="MCP / 02"] .settings-heading p', 'text', '注册本地 stdio MCP；支持的 Agent 同时安装“连接任务先查 KRU”规则。', 'Register the local stdio MCP and install the KRU-first connection rule where supported.'],
+  ['[data-module="MCP / 02"] .settings-heading p', 'text', '注册本地 stdio MCP；支持的 Agent 同时安装“认证任务优先使用 KRU”规则。', 'Register the local stdio MCP and install the KRU-first authentication rule where supported.'],
   ['[data-module="APP / 03"] .settings-heading h2', 'text', '窗口与锁定', 'WINDOW & LOCK'],
   ['[data-module="APP / 03"] .settings-heading p', 'text', '控制关闭按钮与本地 PIN 锁。', 'Control the close button and local PIN lock.'],
   ['label[for="close-behavior"] strong', 'text', '关闭按钮', 'CLOSE BUTTON'],
@@ -151,7 +151,6 @@ const api = {
   ownerSetPin: (pin) => invoke('owner_set_pin', { pin }),
   ownerDisablePin: () => invoke('owner_disable_pin'),
   ownerUnlock: (pin) => invoke('owner_unlock', { pin }),
-  ownerTouch: () => invoke('owner_touch'),
   ownerLock: () => invoke('owner_lock'),
   ownerSecrets: (id) => invoke('owner_secret_view', { id }),
   drafts: () => invoke('owner_editor_drafts'),
@@ -204,7 +203,6 @@ let activityLoadPending = false;
 const expandedActivityErrors = new Set();
 let ownerLockState = { pinConfigured: false, unlocked: false, expiresInSeconds: 0 };
 let ownerPinSetupRequested = false;
-let lastOwnerActivity = Date.now();
 const scrollThumbBindings = [];
 let scrollSyncQueued = false;
 
@@ -384,13 +382,12 @@ function renderMetrics() {
   const enabled = state.connections.filter((item) => item.enabled).length;
   const disabled = total - enabled;
   const moduleCounts = {
-    fill: enabled,
+    fill: state.connections.filter((item) => item.enabled && itemCapabilities(item).includes('fill')).length,
     ssh: state.connections.filter((item) => item.enabled && itemCapabilities(item).includes('ssh')).length,
     api: state.connections.filter((item) => item.enabled && itemCapabilities(item).includes('http')).length,
   };
   const latest = state.activities[0];
   const browserOn = ['listening', 'delegated'].includes(state.browserBridge.status);
-  const browserReady = browserOn && state.browserBridge.paired;
   const mcpReady = state.mcp.status === 'ready';
   const lastStatus = !latest ? 'idle' : latest.status === 'error' ? 'error' : 'ok';
   const lastCode = lastStatus === 'idle' ? '--' : lastStatus === 'error' ? 'ERR' : 'OK';
@@ -417,7 +414,7 @@ function renderMetrics() {
     return '';
   });
   const systemFault = state.mcp.status === 'error' || state.browserBridge.status === 'error';
-  const systemNeedsSetup = !mcpReady || (browserOn && !browserReady);
+  const systemNeedsSetup = !mcpReady || (browserOn && !state.browserBridge.paired);
   const systemCode = systemFault ? 'ERR' : systemNeedsSetup ? 'SET' : 'RDY';
   const settingsTelemetry = brokenAgents
     ? { status: 'error', label: 'AGENTS', code: 'ERR', action: `${displayCount(brokenAgents)} REPAIR` }
@@ -551,14 +548,13 @@ function renderConnections() {
   container.innerHTML = items.map((item) => {
     const stableIndex = state.connections.findIndex((candidate) => candidate.id === item.id) + 1;
     const authModule = itemAuthModule(item);
-    const checkLabel = authModule === 'FILL' ? 'VERIFY' : 'CHECK';
     const capabilities = itemCapabilities(item);
-    const canTest = item.enabled && (capabilities.includes('ssh') || (capabilities.includes('http') && item.baseUrl) || (capabilities.includes('fill') && !capabilities.includes('http')));
+    const canTest = item.enabled && (capabilities.includes('ssh') || (capabilities.includes('http') && item.baseUrl));
     return `<article class="connection-card ${itemCapabilities(item).includes('ssh') ? 'ssh' : itemCapabilities(item).includes('http') ? 'http' : 'fill'} ${item.enabled ? '' : 'disabled'}">
       <div class="module-strip"><span>ITEM / ${String(stableIndex).padStart(2, '0')}</span><button class="module-state" type="button" data-action="toggle-enabled" data-id="${item.id}" aria-pressed="${item.enabled}" title="${item.enabled ? localized('点击停用；Agent 将无法使用其中的秘密', 'Disable this item; agents will no longer be able to use its secrets') : localized('点击启用；Agent 将可以使用其中的秘密', 'Enable this item so agents can use its secrets')}"><i class="status-dot ${item.enabled ? '' : 'off'}"></i>${item.enabled ? 'READY' : 'OFF'}</button></div>
       <div class="connection-top"><div class="connection-main"><div class="connection-name-row"><span class="connection-name"><span>${escapeHtml(item.name)}</span></span></div><div class="connection-address">${escapeHtml(itemDetail(item))}</div></div><div class="connection-symbol">${escapeHtml(authModule)}</div></div>
       ${item.description ? `<div class="connection-description">${escapeHtml(item.description)}</div>` : ''}
-      <div class="card-actions"><button class="small-button" type="button" data-action="test" data-id="${item.id}" ${canTest ? '' : 'disabled'}>${checkLabel}</button><button class="small-button" type="button" data-action="copy-name" data-id="${item.id}" title="${localized('复制 KRU MCP 使用提示', 'Copy KRU MCP use prompt')}" aria-label="${localized('复制 KRU MCP 使用提示', 'Copy KRU MCP use prompt')}">USE</button><button class="small-button" type="button" data-action="edit" data-id="${item.id}">EDIT</button><button class="small-button delete" type="button" data-action="delete" data-id="${item.id}">DEL</button></div>
+      <div class="card-actions"><button class="small-button" type="button" data-action="test" data-id="${item.id}" ${canTest ? '' : 'disabled'}>CHECK</button><button class="small-button" type="button" data-action="copy-name" data-id="${item.id}" title="${localized('复制 KRU MCP 使用提示', 'Copy KRU MCP use prompt')}" aria-label="${localized('复制 KRU MCP 使用提示', 'Copy KRU MCP use prompt')}">USE</button><button class="small-button" type="button" data-action="edit" data-id="${item.id}">EDIT</button><button class="small-button delete" type="button" data-action="delete" data-id="${item.id}">DEL</button></div>
     </article>`;
   }).join('');
   requestAnimationFrame(() => {
@@ -590,9 +586,7 @@ function renderDrafts() {
   const hasDraft = Boolean(editorDrafts[0]);
   const deleteButton = $('#delete-draft-button');
   button.disabled = !hasDraft;
-  button.textContent = hasDraft
-    ? localized(`草稿 ${editorDrafts.length}`, `DRAFTS ${editorDrafts.length}`)
-    : localized('草稿', 'DRAFT');
+  button.textContent = localized('草稿', 'DRAFT');
   button.title = hasDraft ? localized('继续最近的草稿', 'Continue the most recent draft') : localized('暂无草稿', 'No draft');
   deleteButton.classList.toggle('hidden', !hasDraft);
   deleteButton.title = localized('删除草稿', 'Delete draft');
@@ -696,7 +690,7 @@ function renderSettings() {
   const online = ['listening', 'delegated'].includes(bridge.status);
   const strip = $('#browser-status-strip');
   strip.className = `status-strip ${bridge.status === 'error' ? 'error' : online ? '' : 'offline'}`;
-  strip.innerHTML = `<span class="status-dot"></span><span class="status-key">${bridge.status === 'error' ? 'FAULT' : online ? (bridge.paired ? 'PAIRED' : 'READY') : 'OFF'}</span><span>${bridge.status === 'error' ? escapeHtml(publicMessage(bridge.error)) : online ? escapeHtml(bridge.endpoint) : localized('Browser Bridge 已关闭', 'Browser Bridge is off')}</span>`;
+  strip.innerHTML = `<span class="status-dot"></span><span class="status-key">${bridge.status === 'error' ? 'FAULT' : online ? (bridge.connected ? 'CONNECTED' : bridge.paired ? 'WAITING' : 'READY') : 'OFF'}</span><span>${bridge.status === 'error' ? escapeHtml(publicMessage(bridge.error)) : online ? escapeHtml(bridge.endpoint) : localized('Browser Bridge 已关闭', 'Browser Bridge is off')}</span>`;
   $('#reset-pairing-button').disabled = !bridge.paired;
   renderAgents();
   applySettingsSearch();
@@ -800,7 +794,7 @@ function renderModules() {
       : localized('不向 Agent 显示此值', 'Hidden from agent');
     const secretName = moduleSecretName(module);
     const customName = module.kind === 'customSecret'
-      ? `<input class="input module-name-input" data-module-name value="${escapeHtml(module.name || '')}" placeholder="field_name" />`
+      ? `<input class="input module-name-input" data-module-name value="${escapeHtml(module.name || '')}" placeholder="${localized('字段名称', 'FIELD NAME')}" />`
       : `<strong>${escapeHtml(moduleLabel(module.kind))}</strong>${secretName ? `<small>${escapeHtml(secretName)}</small>` : ''}`;
     let control = '';
     let actions = '';
@@ -977,11 +971,13 @@ function collectModules(validate = true) {
   for (const module of currentModules) {
     const name = moduleSecretName(module);
     if (module.kind === 'customSecret') {
-      if (validate && !/^[A-Za-z_][A-Za-z0-9_]*$/.test(name)) throw new Error(localized(`字段名无效：${name}`, `Invalid field name: ${name}`));
-      if (validate && (MODULE_DEFS[name] || ['token', 'apiKey', 'api_key'].includes(name))) throw new Error(localized(`字段名与内置模块冲突：${name}`, `Field name conflicts with a built-in module: ${name}`));
+      if (validate && !name) throw new Error(localized('请输入字段名称', 'Enter a field name'));
+      const normalizedName = name.toLocaleLowerCase().replace(/[\s_-]+/g, '');
+      if (validate && ['username', 'password', 'apicredential', 'privatekey', 'passphrase', 'totp', 'token', 'apikey'].includes(normalizedName)) throw new Error(localized(`字段名与内置模块冲突：${name}`, `Field name conflicts with a built-in module: ${name}`));
     }
-    if (validate && name && secretNames.has(name)) throw new Error(localized(`字段名重复：${name}`, `Duplicate field name: ${name}`));
-    if (name) secretNames.add(name);
+    const uniqueName = name.toLocaleLowerCase().replace(/[\s_-]+/g, '');
+    if (validate && name && secretNames.has(uniqueName)) throw new Error(localized(`字段名重复：${name}`, `Duplicate field name: ${name}`));
+    if (name) secretNames.add(uniqueName);
     modules.push({ kind: module.kind, name: module.kind === 'customSecret' ? name : '', value: MODULE_DEFS[module.kind]?.secret ? '' : String(module.value || '').trim(), agentVisible: Boolean(module.agentVisible) });
     const fieldValue = module.secretValue || '';
     if (name === 'password') secrets.password = fieldValue;
@@ -1552,7 +1548,6 @@ $('#owner-lock-form').addEventListener('submit', async (event) => {
     const settingPin = !ownerLockState.pinConfigured;
     ownerLockState = ownerLockState.pinConfigured ? await api.ownerUnlock(pin) : await api.ownerSetPin(pin);
     ownerPinSetupRequested = false;
-    lastOwnerActivity = Date.now();
     renderOwnerLock();
     if (state) {
       renderMetrics();
@@ -1605,15 +1600,7 @@ window.__TAURI__.event.listen('pin-setup-requested', async () => {
 window.addEventListener('focus', async () => { await refresh(false); await refreshOwnerLock(false); await refreshDrafts(); });
 window.addEventListener('resize', positionModuleMenu);
 $('.form-scroll', $('#connection-modal')).addEventListener('scroll', positionModuleMenu, { passive: true });
-for (const eventName of ['pointerdown', 'keydown']) document.addEventListener(eventName, () => { if (ownerLockState.pinConfigured && ownerLockState.unlocked) lastOwnerActivity = Date.now(); }, { passive: true });
 setInterval(() => { if ($('#page-activity').classList.contains('active')) refresh(false); }, 2000);
-setInterval(async () => {
-  if (!ownerLockState.pinConfigured || !ownerLockState.unlocked) return;
-  try {
-    ownerLockState = Date.now() - lastOwnerActivity < 45_000 ? await api.ownerTouch() : await api.ownerStatus();
-    if (!ownerLockState.unlocked) renderOwnerLock();
-  } catch (_) { await refreshOwnerLock(false); }
-}, 15_000);
 
 async function bootstrap() {
   applyLanguage();

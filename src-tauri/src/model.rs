@@ -28,7 +28,6 @@ pub struct Settings {
     pub browser_enabled: bool,
     pub browser_port: u16,
     pub browser_paired: bool,
-    pub agent_mcp_onboarding_version: u8,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -48,7 +47,6 @@ impl Default for Settings {
             browser_enabled: false,
             browser_port: 39_272,
             browser_paired: false,
-            agent_mcp_onboarding_version: 0,
         }
     }
 }
@@ -58,12 +56,11 @@ mod settings_tests {
     use super::Settings;
 
     #[test]
-    fn older_settings_default_agent_onboarding_to_zero() {
+    fn older_settings_keep_current_defaults() {
         let settings: Settings = serde_json::from_str(
             r#"{"httpEnabled":false,"httpPort":39271,"browserEnabled":false,"browserPort":39272,"browserPaired":false}"#,
         )
         .unwrap();
-        assert_eq!(settings.agent_mcp_onboarding_version, 0);
         assert_eq!(settings.language, "en");
         assert_eq!(settings.close_behavior, "tray");
     }
@@ -807,6 +804,7 @@ pub struct SecurityState {
 pub struct BrowserBridgeState {
     pub enabled: bool,
     pub paired: bool,
+    pub connected: bool,
     pub status: String,
     pub error: String,
     pub endpoint: String,

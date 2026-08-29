@@ -62,7 +62,7 @@
             </section>
 
             <section class="content-panel settings-card" data-module="MCP / 02">
-              <div class="settings-heading"><div class="square-icon purple">IO</div><div><h2>连接 Agent</h2><p>注册本地 stdio MCP；支持的 Agent 同时安装“连接任务先查 KRU”规则。</p></div></div>
+              <div class="settings-heading"><div class="square-icon purple">IO</div><div><h2>连接 Agent</h2><p>注册本地 stdio MCP；支持的 Agent 同时安装“认证任务优先使用 KRU”规则。</p></div></div>
               <div class="status-strip" id="mcp-status-strip"></div>
               <div class="agent-restart-notice hidden" id="agent-restart-notice"><strong>NEW SESSION REQUIRED</strong><span>注册或修复后，请完全退出并重新打开 Agent。</span></div>
               <div class="agent-client-list" id="agent-client-list"><div class="agent-scan-placeholder">正在扫描本机 Agent</div></div>
@@ -81,7 +81,7 @@
             <section class="content-panel settings-card" data-module="WEB / 04">
               <div class="settings-heading"><div class="square-icon coral">WEB</div><div><h2>Browser Bridge</h2><p>浏览器无人值守填写的可靠路径；桌面模式要求真实系统前台焦点。</p></div><label class="switch"><input type="checkbox" id="browser-enabled" /><span></span></label></div>
               <div class="status-strip" id="browser-status-strip"></div>
-              <label class="field-label" for="browser-port">本地端口</label><div class="inline-setting"><input class="input" id="browser-port" type="number" min="1024" max="65535" /><button class="button secondary" id="save-browser-settings-button">保存</button></div>
+              <label class="field-label" for="browser-port">本地端口</label><div class="inline-setting"><input class="input" id="browser-port" type="number" min="1" max="65535" /><button class="button secondary" id="save-browser-settings-button">保存</button></div>
               <div class="browser-connect-note"><strong>ONE-TIME SETUP</strong><span>点击后已安装扩展会自动配对；首次使用只需在打开的扩展页加载目录。</span></div>
               <div class="button-row bridge-actions"><button class="button primary" id="quick-pairing-button">一键接入浏览器</button><button class="button quiet" id="open-extension-button">扩展目录</button><button class="button danger-soft" id="reset-pairing-button">重置</button></div>
             </section>

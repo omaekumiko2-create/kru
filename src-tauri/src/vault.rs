@@ -100,7 +100,7 @@ impl Vault {
             serde_json::from_slice(&bytes).context("保险库文件格式无效")?;
         if document.version != 7 {
             bail!(
-                "KRU 0.14 仅支持模块化 v7 保险库；当前文件版本为 {}",
+                "KRU 0.15 仅支持模块化 v7 保险库；当前文件版本为 {}",
                 document.version
             );
         }
@@ -169,6 +169,7 @@ impl Vault {
             })
             .collect::<Result<Vec<_>>>()?;
         drafts.sort_by(|left, right| right.updated_at.cmp(&left.updated_at));
+        drafts.truncate(1);
         Ok(drafts)
     }
 
@@ -183,7 +184,7 @@ impl Vault {
         let updated_at = Utc::now().to_rfc3339();
         let payload = self.inner.key.encrypt(&input)?;
         self.update_document(|document| {
-            document.editor_drafts.retain(|draft| draft.id != id);
+            document.editor_drafts.clear();
             document.editor_drafts.push(StoredEditorDraft {
                 id,
                 updated_at: updated_at.clone(),
@@ -210,8 +211,8 @@ impl Vault {
     }
 
     pub fn update_settings(&self, mut next: Settings) -> Result<Settings> {
-        if next.browser_port < 1024 {
-            bail!("本地端口必须在 1024–65535 之间");
+        if next.browser_port == 0 {
+            bail!("本地端口必须在 1–65535 之间");
         }
         next.language = if next.language.eq_ignore_ascii_case("en") {
             "en".to_owned()
@@ -226,8 +227,6 @@ impl Vault {
         self.update_document(|document| {
             // Pairing state is changed only by the authenticated bridge handshake.
             next.browser_paired = document.settings.browser_paired;
-            // Agent onboarding is changed only by its dedicated command.
-            next.agent_mcp_onboarding_version = document.settings.agent_mcp_onboarding_version;
             document.settings = next.clone();
             Ok(())
         })?;
@@ -255,20 +254,13 @@ impl Vault {
                 next.browser_enabled = browser_enabled;
             }
             if let Some(browser_port) = patch.browser_port {
-                if browser_port < 1024 {
-                    bail!("本地端口必须在 1024–65535 之间");
+                if browser_port == 0 {
+                    bail!("本地端口必须在 1–65535 之间");
                 }
                 next.browser_port = browser_port;
             }
             document.settings = next.clone();
             Ok(next)
-        })
-    }
-
-    pub fn complete_agent_mcp_onboarding(&self) -> Result<()> {
-        self.update_document(|document| {
-            document.settings.agent_mcp_onboarding_version = 1;
-            Ok(())
         })
     }
 
@@ -436,10 +428,6 @@ impl Vault {
                 .unwrap_or_default();
             if !input.private_key_import_path.trim().is_empty() {
                 let path = PathBuf::from(input.private_key_import_path.trim());
-                let metadata = fs::metadata(&path).context("无法读取 SSH 私钥")?;
-                if metadata.len() > 1_048_576 {
-                    bail!("SSH 私钥文件不能超过 1 MB");
-                }
                 secrets.private_key =
                     Some(fs::read_to_string(&path).context("SSH 私钥必须是文本格式")?);
                 imported_key_name = path
@@ -766,7 +754,7 @@ fn canonical_secret_module_name(kind: &str) -> Option<&'static str> {
 fn normalize_modules(modules: Vec<ItemModule>) -> Result<Vec<ItemModule>> {
     let mut output = Vec::new();
     let mut singleton_kinds = Vec::new();
-    let mut secret_names = Vec::new();
+    let mut secret_names: Vec<String> = Vec::new();
     for mut module in modules {
         module.kind = module.kind.trim().to_owned();
         if !matches!(
@@ -798,10 +786,7 @@ fn normalize_modules(modules: Vec<ItemModule>) -> Result<Vec<ItemModule>> {
             module.value.clear();
         } else if module.kind == "customSecret" {
             module.name = checked_text(&module.name, "自定义秘密字段名称", 80)?;
-            if !valid_identifier(&module.name)
-                || canonical_secret_module_name(&module.name).is_some()
-                || matches!(module.name.as_str(), "token" | "apiKey" | "api_key")
-            {
+            if !valid_custom_field_name(&module.name) || reserved_secret_name(&module.name) {
                 bail!("自定义秘密字段名称无效：{}", module.name);
             }
             module.value.clear();
@@ -817,15 +802,15 @@ fn normalize_modules(modules: Vec<ItemModule>) -> Result<Vec<ItemModule>> {
             }
         }
         if let Some(name) = module.secret_name() {
-            if secret_names.iter().any(|candidate| candidate == name) {
+            if secret_names
+                .iter()
+                .any(|candidate| normalized_field_name(candidate) == normalized_field_name(name))
+            {
                 bail!("秘密模块字段名称重复：{name}");
             }
             secret_names.push(name.to_owned());
         }
         output.push(module);
-    }
-    if output.len() > 50 {
-        bail!("每个项目最多包含 50 个模块");
     }
     Ok(output)
 }
@@ -982,10 +967,8 @@ fn normalize_connection_v7(
         if !matches!(parsed.scheme(), "http" | "https")
             || !parsed.username().is_empty()
             || parsed.password().is_some()
-            || parsed.query().is_some()
-            || parsed.fragment().is_some()
         {
-            bail!("API URL 仅支持不含认证、查询参数或片段的 HTTP/HTTPS 地址");
+            bail!("API URL 必须使用 HTTP/HTTPS，且不能把账号或密码写在地址中");
         }
         normalized
     } else {
@@ -1179,12 +1162,24 @@ fn merge_secret_bundle(current: &mut SecretBundle, next: &SecretBundle) {
 }
 
 fn prepare_auto_api(input: &mut ConnectionInput, secrets: &mut SecretBundle) -> Result<()> {
-    if !input
+    if input.http_auth_type != "auto" {
+        return Ok(());
+    }
+    let has_api_credential = input
         .modules
         .iter()
-        .any(|module| module.kind == "apiCredential")
-        || input.http_auth_type != "auto"
-    {
+        .any(|module| module.kind == "apiCredential");
+    if !has_api_credential {
+        let basic_ready = module_value(&input.modules, "url").is_some()
+            && module_secret_configured(&input.modules, secrets, "username")
+            && module_secret_configured(&input.modules, secrets, "password");
+        if basic_ready {
+            input.http_auth_type = "basic".to_owned();
+            input.auth_header = "Authorization".to_owned();
+            input.auth_location = "header".to_owned();
+            input.auth_prefix.clear();
+            input.api_auth_headers.clear();
+        }
         return Ok(());
     }
     let Some(secret) = secrets
@@ -1220,12 +1215,30 @@ fn prepare_auto_api(input: &mut ConnectionInput, secrets: &mut SecretBundle) -> 
     Ok(())
 }
 
-fn valid_identifier(value: &str) -> bool {
-    let mut chars = value.chars();
-    chars
-        .next()
-        .is_some_and(|first| first.is_ascii_alphabetic() || first == '_')
-        && chars.all(|character| character.is_ascii_alphanumeric() || character == '_')
+fn valid_custom_field_name(value: &str) -> bool {
+    !value.is_empty() && !value.chars().any(char::is_control)
+}
+
+fn normalized_field_name(value: &str) -> String {
+    value
+        .chars()
+        .filter(|character| !character.is_whitespace() && !matches!(character, '_' | '-'))
+        .flat_map(char::to_lowercase)
+        .collect()
+}
+
+fn reserved_secret_name(value: &str) -> bool {
+    matches!(
+        normalized_field_name(value).as_str(),
+        "username"
+            | "password"
+            | "apicredential"
+            | "privatekey"
+            | "passphrase"
+            | "totp"
+            | "token"
+            | "apikey"
+    )
 }
 
 fn normalize_http_methods(values: Vec<String>) -> Result<Vec<String>> {
@@ -1468,23 +1481,14 @@ mod tests {
         replacement.name = "replacement-draft".to_owned();
         let replacement = vault.save_editor_draft(None, replacement).unwrap();
         let drafts = vault.list_editor_drafts().unwrap();
-        assert_eq!(drafts.len(), 2);
-        assert!(drafts.iter().any(|draft| draft.id == replacement.id));
-        assert_eq!(
-            drafts
-                .iter()
-                .find(|draft| draft.id == replacement.id)
-                .unwrap()
-                .input
-                .id,
-            Some(existing_item_id)
-        );
+        assert_eq!(drafts.len(), 1);
+        assert_eq!(drafts[0].id, replacement.id);
+        assert_eq!(drafts[0].input.id, Some(existing_item_id));
         assert_ne!(replacement.id, saved.id);
 
         vault.delete_editor_draft(replacement.id).unwrap();
         let drafts = vault.list_editor_drafts().unwrap();
-        assert_eq!(drafts.len(), 1);
-        assert_eq!(drafts[0].id, saved.id);
+        assert!(drafts.is_empty());
     }
 
     #[test]
@@ -1509,6 +1513,41 @@ mod tests {
             .value = "api.example.test/v1".to_owned();
         let normalized = vault.save_connection(input).unwrap();
         assert_eq!(normalized.base_url, "https://api.example.test/v1");
+
+        let mut input = api_input(None, "Query API", "query-api-secret");
+        input
+            .modules
+            .iter_mut()
+            .find(|module| module.kind == "url")
+            .unwrap()
+            .value = "http://api.example.test/v1?preview=true".to_owned();
+        let query_url = vault.save_connection(input).unwrap();
+        assert_eq!(
+            query_url.base_url,
+            "http://api.example.test/v1?preview=true"
+        );
+    }
+
+    #[test]
+    fn url_username_and_password_automatically_enable_basic_http() {
+        let directory = tempdir().unwrap();
+        let vault = Vault::open(directory.path().join("vault")).unwrap();
+        let mut input = ssh_input(None);
+        input.name = "Basic HTTP".to_owned();
+        input.http_auth_type = "auto".to_owned();
+        input
+            .modules
+            .retain(|module| !matches!(module.kind.as_str(), "host" | "port"));
+        input.modules.push(ItemModule {
+            kind: "url".into(),
+            value: "api.example.test/v1".into(),
+            ..Default::default()
+        });
+
+        let saved = vault.save_connection(input).unwrap();
+        assert_eq!(saved.capabilities, vec!["fill", "http"]);
+        assert_eq!(saved.http_auth_type, "basic");
+        assert_eq!(saved.base_url, "https://api.example.test/v1");
     }
 
     #[test]
@@ -2029,6 +2068,30 @@ mod tests {
             vault
                 .get_secret_value(saved.id, &format!("{module_name}x"))
                 .is_err()
+        );
+    }
+
+    #[test]
+    fn custom_secret_modules_accept_natural_names() {
+        let directory = tempdir().unwrap();
+        let vault = Vault::open(directory.path().join("vault")).unwrap();
+        let module_name = "备用 验证码";
+        let mut input = api_input(None, "Natural module name", "api-secret");
+        input.modules.push(ItemModule {
+            kind: "customSecret".into(),
+            name: module_name.into(),
+            agent_visible: Some(false),
+            ..Default::default()
+        });
+        input
+            .secrets
+            .named_secrets
+            .insert(module_name.into(), "custom-value".into());
+        let saved = vault.save_connection(input).unwrap();
+
+        assert_eq!(
+            vault.get_secret_value(saved.id, module_name).unwrap().2,
+            "custom-value"
         );
     }
 }

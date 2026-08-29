@@ -248,14 +248,49 @@ impl BrowserBridge {
 
     pub async fn status(&self) -> BrowserBridgeState {
         let settings = self.vault.settings().unwrap_or_default();
-        let runtime = self.runtime.lock().await;
+        let (status, error) = {
+            let runtime = self.runtime.lock().await;
+            (runtime.status.clone(), runtime.error.clone())
+        };
+        let connected = settings.browser_enabled
+            && settings.browser_paired
+            && matches!(status.as_str(), "listening" | "delegated")
+            && self.probe_fill_ready(settings.browser_port).await;
         BrowserBridgeState {
             enabled: settings.browser_enabled,
             paired: settings.browser_paired,
-            status: runtime.status.clone(),
-            error: runtime.error.clone(),
+            connected,
+            status,
+            error,
             endpoint: format!("ws://127.0.0.1:{}/extension", settings.browser_port),
         }
+    }
+
+    pub async fn fill_ready(&self) -> bool {
+        let Ok(settings) = self.vault.settings() else {
+            return false;
+        };
+        if !settings.browser_enabled || !settings.browser_paired {
+            return false;
+        }
+        self.ensure_started(settings.browser_port).await.is_ok()
+            && self.probe_fill_ready(settings.browser_port).await
+    }
+
+    pub fn fill_configured(&self) -> bool {
+        self.vault
+            .settings()
+            .is_ok_and(|settings| settings.browser_enabled && settings.browser_paired)
+    }
+
+    async fn probe_fill_ready(&self, port: u16) -> bool {
+        self.client
+            .get(format!("http://127.0.0.1:{port}/internal/ready"))
+            .bearer_auth(self.internal_token().unwrap_or_default())
+            .timeout(HEALTH_REQUEST_TIMEOUT)
+            .send()
+            .await
+            .is_ok_and(|response| response.status().is_success())
     }
 
     pub async fn create_pairing_code(&self) -> Result<String> {
@@ -408,6 +443,7 @@ impl BrowserBridge {
                     .route("/claim", post(claim))
                     .route("/extension", get(extension_upgrade))
                     .route("/internal/health", get(internal_health))
+                    .route("/internal/ready", get(internal_ready))
                     .route("/internal/pair-code", post(create_pair_code))
                     .route("/internal/quick-pair", post(create_quick_pair))
                     .route("/internal/jobs", post(submit_job))
@@ -489,6 +525,21 @@ async fn internal_health(
 ) -> Result<&'static str, (StatusCode, String)> {
     require_bearer(&headers, &state.internal_token)?;
     Ok("ok")
+}
+
+async fn internal_ready(
+    State(state): State<BridgeServerState>,
+    headers: HeaderMap,
+) -> Result<&'static str, (StatusCode, String)> {
+    require_bearer(&headers, &state.internal_token)?;
+    if state.extensions.lock().await.active().is_some() {
+        Ok("ready")
+    } else {
+        Err((
+            StatusCode::SERVICE_UNAVAILABLE,
+            "浏览器扩展未连接".to_owned(),
+        ))
+    }
 }
 
 async fn create_pair_code(
@@ -1036,8 +1087,11 @@ mod tests {
         settings.browser_enabled = true;
         settings.browser_port = port;
         vault.update_settings(settings).unwrap();
+        vault.set_browser_paired(true).unwrap();
         let bridge = BrowserBridge::new(vault);
         bridge.sync().await;
+        assert!(bridge.fill_configured());
+        assert!(!bridge.fill_ready().await);
 
         let url = format!("ws://127.0.0.1:{port}/extension");
         let auth = serde_json::json!({
@@ -1060,6 +1114,9 @@ mod tests {
                 .unwrap()
                 .contains("ready")
         );
+        sleep(Duration::from_millis(20)).await;
+        assert!(bridge.fill_ready().await);
+        assert!(bridge.status().await.connected);
 
         let (mut second, _) = tokio_tungstenite::connect_async(&url).await.unwrap();
         second.send(ClientMessage::Text(auth.into())).await.unwrap();

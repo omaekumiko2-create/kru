@@ -2949,7 +2949,7 @@ dependencies = [
 
 [[package]]
 name = "kru"
-version = "0.14.0"
+version = "0.15.0"
 dependencies = [
  "anyhow",
  "argon2 0.5.3",

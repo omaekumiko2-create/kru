@@ -35,7 +35,7 @@ The quoted text is the item name saved in KRU. If you omit it, the agent can ins
 
 ## What KRU does
 
-KRU is a small local MCP tool for saving and using credentials without breaking an agent's workflow. The agent controls the task, while KRU performs the final credential operation locally—filling a focused field, authenticating an SSH session, or sending an authenticated API request.
+KRU is a small local MCP tool for saving and using credentials without breaking an agent's workflow. The agent controls the task, while KRU performs credential operations locally—filling a focused field, running local or SSH commands, transferring files and directories, or sending authenticated API requests.
 
 KRU stores credentials as independent modules rather than fixed “login / SSH / API” item types. Username, password, API credential, private key, key passphrase, TOTP, host, port, URL, and custom fields can be combined in one item. The available MCP actions are derived automatically from that combination.
 
@@ -71,10 +71,10 @@ KRU registers a local `stdio` MCP command. The MCP process starts on demand when
 | Action | When KRU advertises it | What happens locally |
 | --- | --- | --- |
 | **Fill** | The item contains a credential module | KRU writes the selected value into a focused browser, desktop control, or managed terminal |
-| **SSH** | Host + port + username + password/private key | KRU authenticates locally and runs the command requested by the agent |
-| **File transfer** | The item has the same SSH module combination | KRU uploads or downloads directly over SFTP and creates destination parent directories |
-| **HTTP** | The item contains an API credential | KRU injects authentication and sends the constrained request |
-| **Terminal** | The agent opens a managed terminal | KRU can write a selected secret without returning it to the agent |
+| **SSH** | The item contains a password or private key | KRU authenticates locally; the host, port, and username can be saved defaults or supplied for the task |
+| **File transfer** | The item contains a password or private key | KRU recursively uploads or downloads files and directories over SFTP |
+| **HTTP** | The item contains any configured secret | KRU injects built-in authentication or resolves hidden-module placeholders locally |
+| **Terminal** | The agent runs a local command or opens a managed terminal | KRU can substitute hidden modules without returning them to the agent |
 
 An item may advertise more than one action. KRU has no observation, diagnostic, restricted, or execution mode: if `ssh_run` is available, the agent sends the command the task actually requires.
 
@@ -106,11 +106,11 @@ Reliable unattended browser filling uses the bundled Chromium extension. KRU wri
 
 ### SSH
 
-KRU supports password and private-key authentication, long commands, and direct SFTP upload/download. Destination parent directories are created automatically and existing targets are replaced by default through a temporary-file write. KRU connects to the host and port saved by the user; it does not pin or compare SSH host fingerprints. Authentication plaintext is not returned to the agent.
+KRU supports password and private-key authentication, unrestricted-length commands and output, direct stdin, and recursive SFTP upload/download. Host, port, and username may be saved as defaults or supplied for the current task. Destination parent directories are created automatically and existing file or directory targets are replaced only after a complete temporary copy is ready. KRU does not pin or compare SSH host fingerprints. Authentication plaintext is not returned to the agent.
 
 ### HTTP APIs
 
-KRU recognizes common API providers and falls back to Bearer Token when no provider matches. A saved service URL locks requests to the same Origin and lets the agent omit the URL or supply a relative path. Without one, the agent must provide an absolute HTTPS URL; plain HTTP is allowed only for loopback addresses. Same-origin redirects are followed, large responses can stream directly to a local file, and JSON, text, forms, raw Base64, and multipart file bodies are supported.
+KRU recognizes common API providers and Basic combinations, and falls back to Bearer Token when no provider matches. A saved service URL is a default and relative-path base, not an Origin restriction; the agent may use any HTTP/HTTPS destination required by the task. Other protocols can place `{{kru:module name}}` placeholders in the URL, headers, query, JSON/text body, or form values, and KRU resolves them locally. Redirects are followed, responses have no default size limit and may stream directly to a local file, and multipart uploads are supported.
 
 ## Local app controls
 
@@ -153,7 +153,7 @@ Exported `.mvault` packages are encrypted and portable, but they contain their o
 
 ## MCP surface
 
-KRU 0.14 exposes one strict MCP surface: discover credentials with `items_search`, pass the known item name as `query`, and call only an action advertised by that item. Hidden plaintext must never be requested from the user, and KRU has no invented observation, diagnostic, or execution modes. Unknown fields and retired tool names are rejected.
+KRU 0.15 uses unique item names directly instead of exposing internal UUIDs. If the user has already named the item and the action is clear, the agent can call that action immediately. An explicit item or a unique `items_search` result becomes lightweight context for the current MCP session, so compatible fill, SSH, transfer, HTTP, and terminal calls can omit the repeated name. Natural phrases such as `use Production Server in KRU MCP` are understood. Discovery remains available for lookup, switching, module inspection, and ambiguity. Hidden plaintext must never be requested from the user, and unknown fields or retired tool names are rejected.
 
 Each agent session owns its stdio MCP process. Starting a newer KRU build or another agent session does not interrupt work already in progress; sessions end when their client disconnects or the user explicitly quits KRU from the tray.
 
@@ -161,16 +161,17 @@ Each agent session owns its stdio MCP process. Starting a newer KRU build or ano
 | --- | --- | --- |
 | `items_search(query?)` | Find usable items, modules, and advertised actions | Read-only, idempotent, local |
 | `credential_fill` | Use one saved module in an approved local target, optionally submitting it | Changes local state; submission can have external effects |
-| `ssh_run` | Run the requested command through a stored SSH identity | External effects possible |
-| `ssh_upload` | Upload a local file through a stored SSH identity | Reads a local file and changes the remote target |
-| `ssh_download` | Download a remote file through a stored SSH identity | Reads a remote file and changes the local target |
+| `terminal_run` | Run a one-shot local shell command with optional stdin and hidden-module substitution | Local or external effects possible |
+| `ssh_run` | Run a command through a saved identity and saved or runtime SSH target | External effects possible |
+| `ssh_upload` | Recursively upload a local file or directory through a saved identity | Reads a local path and changes the remote target |
+| `ssh_download` | Recursively download a remote file or directory through a saved identity | Reads a remote path and changes the local target |
 | `http_send` | Send an authenticated HTTP request, optionally transferring local files | External and local-file effects possible |
 | `terminal_start` | Start a managed local process | Changes local state |
 | `terminal_write` | Write ordinary input into a managed terminal | External effects possible |
 | `terminal_read` | Read redacted managed-terminal output | Read-only, idempotent, local |
 | `terminal_stop` | Close a managed terminal session | Idempotent state change |
 
-With no `query`, `items_search` returns all usable items. With one, an exact case-insensitive name match wins; otherwise KRU returns names containing the query. This keeps unrelated credential metadata out of the Agent context when the item is already known.
+Ordinary commands, scripts, JSON, or configuration can be passed directly through `terminal_run.stdin` or `ssh_run.stdin`, avoiding shell escaping and temporary files. Commands, stdin, paths, PTY input, and HTTP request fields can reference hidden modules with `{{kru:module name}}`. Local paths accept absolute, home-relative, and MCP-workspace-relative forms. KRU imposes no fixed limit on command length, SSH or terminal output, module count, or concurrent terminal count; callers may still opt into explicit time or response-size limits.
 
 Every successful tool call returns typed `structuredContent` and equivalent JSON text. Business failures return an MCP tool result with `isError=true`; malformed protocol input remains a protocol error. Tool annotations help clients describe impact, but all real security restrictions are enforced by KRU's backend.
 

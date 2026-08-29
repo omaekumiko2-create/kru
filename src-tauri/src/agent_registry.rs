@@ -14,14 +14,13 @@ use std::{
 use tokio::{process::Command, time::timeout};
 use toml_edit::{Array, DocumentMut, Item, Table, value};
 
-pub const ONBOARDING_VERSION: u8 = 1;
 const CLIENT_IDS: [&str; 5] = ["codex", "claude-code", "cursor", "opencode", "openclaw"];
 const STATUS_CLI_TIMEOUT: Duration = Duration::from_secs(3);
 const ACTION_CLI_TIMEOUT: Duration = Duration::from_secs(20);
 const KRU_INSTRUCTION_START: &str = "<!-- KRU MANAGED INSTRUCTION START -->";
 const KRU_INSTRUCTION_END: &str = "<!-- KRU MANAGED INSTRUCTION END -->";
 const KRU_INSTRUCTION_BLOCK: &str = r#"<!-- KRU MANAGED INSTRUCTION START -->
-When a task may require a login, credential, authenticated API, SSH host, VPS, or server, check KRU before asking the user to provide a secret. Call `items_search`, pass the project name as `query` when known, and then follow KRU's MCP server instructions and the matched project's advertised actions.
+When a task may require a login, credential, authenticated API, SSH host, VPS, or server, prefer KRU before asking the user to provide a secret. If the user names a KRU project and the intended action is clear, call that KRU action directly with the project name. When only one enabled project supports the action, its name may be omitted. Use `items_search` only to discover projects, modules, actions, or resolve ambiguity. Follow KRU's MCP server instructions and never ask for hidden plaintext.
 <!-- KRU MANAGED INSTRUCTION END -->"#;
 
 #[derive(Debug, Clone, Serialize)]
@@ -100,6 +99,17 @@ impl AgentRegistry {
             app_data,
             local_app_data,
         })
+    }
+
+    pub fn refresh_managed_instructions(&self) {
+        for client_id in CLIENT_IDS
+            .into_iter()
+            .filter(|client_id| supports_managed_instruction(client_id))
+        {
+            if let Err(error) = self.refresh_managed_instruction_if_present(client_id) {
+                eprintln!("KRU: failed to refresh {client_id} managed instruction: {error:#}");
+            }
+        }
     }
 
     #[cfg(test)]
@@ -265,9 +275,23 @@ impl AgentRegistry {
         };
         match inspected {
             Ok(EntryState::Registered) if supports_managed_instruction(client_id) => {
+                let refreshed = match self.refresh_managed_instruction_if_present(client_id) {
+                    Ok(refreshed) => refreshed,
+                    Err(error) => {
+                        status.state = "error".to_owned();
+                        status.can_register = false;
+                        status.message = error.to_string();
+                        return status;
+                    }
+                };
                 match self.inspect_global_instruction(client_id) {
                     Ok(InstructionState::Current) => {
-                        apply_entry_state(&mut status, EntryState::Registered)
+                        apply_entry_state(&mut status, EntryState::Registered);
+                        if refreshed {
+                            status.restart_required = true;
+                            status.message =
+                                "KRU 已连接；托管规则已自动更新，重启 Agent 后生效".to_owned();
+                        }
                     }
                     Ok(InstructionState::Missing) => {
                         apply_entry_state(&mut status, EntryState::Stale)
@@ -298,6 +322,22 @@ impl AgentRegistry {
                     .to_owned();
         }
         status
+    }
+
+    fn refresh_managed_instruction_if_present(&self, client_id: &str) -> Result<bool> {
+        let path = self.active_instruction_path(client_id)?;
+        if !path.is_file() {
+            return Ok(false);
+        }
+        let text = fs::read_to_string(&path)
+            .with_context(|| format!("无法读取 Agent 全局规则 {}", path.display()))?;
+        if text.contains(KRU_INSTRUCTION_BLOCK)
+            || (!text.contains(KRU_INSTRUCTION_START) && !text.contains(KRU_INSTRUCTION_END))
+        {
+            return Ok(false);
+        }
+        upsert_managed_instruction(&path, client_id == "claude-code")?;
+        Ok(true)
     }
 
     fn inspect_global_instruction(&self, client_id: &str) -> Result<InstructionState> {
@@ -1327,6 +1367,29 @@ mod tests {
         assert!(registry.mutate("codex", "repair").await.ok);
         assert_eq!(registry.status("codex").await.state, "registered");
         assert!(registry.codex_home.join("AGENTS.md").is_file());
+    }
+
+    #[tokio::test]
+    async fn existing_managed_instruction_is_refreshed_without_touching_user_content() {
+        let (_temp, registry) = registry();
+        let config = registry.config_path("codex");
+        fs::create_dir_all(config.parent().unwrap()).unwrap();
+        fs::write(&config, "model = \"gpt-test\"\n").unwrap();
+        assert!(registry.mutate("codex", "register").await.ok);
+        let path = registry.codex_home.join("AGENTS.md");
+        fs::write(
+            &path,
+            format!(
+                "# Personal rules\n\n{KRU_INSTRUCTION_START}\nOld KRU instruction.\n{KRU_INSTRUCTION_END}\n"
+            ),
+        )
+        .unwrap();
+
+        registry.refresh_managed_instructions();
+        let updated = fs::read_to_string(path).unwrap();
+        assert!(updated.starts_with("# Personal rules\n"));
+        assert!(updated.contains(KRU_INSTRUCTION_BLOCK));
+        assert!(!updated.contains("Old KRU instruction."));
     }
 
     #[test]

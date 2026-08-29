@@ -81,11 +81,11 @@ struct TerminalSession {
 
 impl TerminalSession {
     fn close_pty_io(&self) {
-        if let Ok(mut writer) = self.writer.lock() {
-            writer.take();
-        }
         if let Ok(mut master) = self.master.lock() {
             master.take();
+        }
+        if let Ok(mut writer) = self.writer.lock() {
+            writer.take();
         }
     }
 }
@@ -95,11 +95,11 @@ impl Drop for TerminalSession {
         if let Ok(child) = self.child.get_mut() {
             let _ = child.kill();
         }
-        if let Ok(mut writer) = self.writer.lock() {
-            writer.take();
-        }
         if let Ok(master) = self.master.get_mut() {
             master.take();
+        }
+        if let Ok(mut writer) = self.writer.lock() {
+            writer.take();
         }
     }
 }
@@ -218,8 +218,10 @@ impl TerminalManager {
                             ) && let Ok(mut writer) = reader_writer.lock()
                                 && let Some(writer) = writer.as_mut()
                             {
+                                // ConPTY pipes are unbuffered. Flushing their Windows file
+                                // handle can wait indefinitely for the child to consume the
+                                // response while holding the writer lock.
                                 let _ = writer.write_all(b"\x1b[1;1R");
-                                let _ = writer.flush();
                             }
                             if let Ok(mut output) = reader_output.lock() {
                                 output.push(&buffer[..count]);
@@ -275,8 +277,7 @@ impl TerminalManager {
         let writer = writer.as_mut().context("终端会话已经结束")?;
         writer
             .write_all(text.as_bytes())
-            .context("无法写入终端会话")?;
-        writer.flush().context("无法刷新终端输入")
+            .context("无法写入终端会话")
     }
 
     pub fn fill_value(&self, session_id: Uuid, value: &str, submit: bool) -> Result<()> {

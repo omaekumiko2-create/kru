@@ -2861,14 +2861,7 @@ mod tests {
         let directory = tempdir().unwrap();
         let mcp = VaultMcp::new(Vault::open(directory.path().join("vault")).unwrap());
         #[cfg(windows)]
-        let (program, args) = (
-            "powershell.exe".to_owned(),
-            vec![
-                "-NoProfile".to_owned(),
-                "-Command".to_owned(),
-                "Start-Sleep -Milliseconds 300; [Console]::ReadLine() | Write-Output".to_owned(),
-            ],
-        );
+        let (program, args) = ("cmd.exe".to_owned(), vec!["/D".to_owned(), "/Q".to_owned()]);
         #[cfg(not(windows))]
         let (program, args) = (
             "/bin/sh".to_owned(),
@@ -2883,7 +2876,11 @@ mod tests {
                 program,
                 args,
                 cwd: None,
-                command: "KRU_INITIAL_COMMAND_MARKER".to_owned(),
+                command: if cfg!(windows) {
+                    "echo KRU_INITIAL_COMMAND_MARKER".to_owned()
+                } else {
+                    "KRU_INITIAL_COMMAND_MARKER".to_owned()
+                },
                 secret_env: HashMap::new(),
             }))
             .await,
@@ -2892,7 +2889,7 @@ mod tests {
         let read = structured_value(
             &mcp.terminal_read(Parameters(TerminalReadInput {
                 session_id: String::new(),
-                wait_seconds: None,
+                wait_seconds: Some(10),
                 until: Some("KRU_INITIAL_COMMAND_MARKER".into()),
             }))
             .await,
@@ -2977,7 +2974,7 @@ mod tests {
                 command: one_shot_command.into(),
                 stdin: Some("stdin={{kru:password}}".into()),
                 cwd: None,
-                timeout_seconds: None,
+                timeout_seconds: Some(10),
                 secret_env: HashMap::from([("KRU_HIDDEN_ENV".into(), "password".into())]),
             }))
             .await,

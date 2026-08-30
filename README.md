@@ -1,5 +1,5 @@
 <p align="center">
-  <img src=".github/assets/kru-hero.svg" alt="KRU local MCP password and credential manager for AI agents" width="100%" />
+  <img src=".github/assets/kru-hero.png" alt="KRU local MCP password and credential manager for AI agents" width="100%" />
 </p>
 
 <h1 align="center">KRU — Local password and credential manager for AI agents</h1>

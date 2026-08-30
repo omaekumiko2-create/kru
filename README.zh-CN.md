@@ -1,5 +1,5 @@
 <p align="center">
-  <img src=".github/assets/kru-hero.svg" alt="KRU 面向 AI Agent 的本地 MCP 密码与凭据管理器" width="100%" />
+  <img src=".github/assets/kru-hero.png" alt="KRU 面向 AI Agent 的本地 MCP 密码与凭据管理器" width="100%" />
 </p>
 
 <h1 align="center">KRU — 跨平台 AI Agent 密码库与凭据输入器</h1>

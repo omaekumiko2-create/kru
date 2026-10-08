@@ -1,5 +1,7 @@
 # Security
 
+**English** · [简体中文](SECURITY.zh-CN.md)
+
 KRU is a local credential execution tool exposed through stdio MCP. Its primary goal is to let an Agent complete authentication without placing hidden credential plaintext in ordinary MCP arguments or responses.
 
 ## Security goals

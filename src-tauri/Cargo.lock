@@ -2953,7 +2953,6 @@ version = "0.15.0"
 dependencies = [
  "anyhow",
  "argon2 0.5.3",
- "async-trait",
  "atomic-write-file",
  "axum",
  "base64 0.22.1",
@@ -2986,7 +2985,6 @@ dependencies = [
  "tauri-plugin-dialog",
  "tauri-plugin-opener",
  "tempfile",
- "thiserror 2.0.20",
  "tokio",
  "tokio-tungstenite",
  "tokio-util",

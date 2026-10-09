@@ -177,7 +177,11 @@ impl VaultMcp {
                 .vault
                 .get_connection(item_id)
                 .map_err(|_| "该终端绑定的 KRU 项目已不可用；请重新指定 item".to_owned())?;
-            if !connection.stored.enabled || !connection.stored.has_capability("fill") {
+            if !connection.stored.enabled
+                || !connection
+                    .stored
+                    .has_capability(&connection.secrets, "fill")
+            {
                 return Err("该终端绑定的 KRU 项目已不可用；请重新指定 item".to_owned());
             }
             return Ok(connection);
@@ -245,7 +249,8 @@ impl VaultMcp {
             .map_err(|error| error.to_string())?
             .into_iter()
             .filter(|decrypted| {
-                decrypted.stored.enabled && !decrypted.stored.normalized_capabilities().is_empty()
+                decrypted.stored.enabled
+                    && !decrypted.stored.capabilities(&decrypted.secrets).is_empty()
             })
             .collect::<Vec<_>>();
 
@@ -296,17 +301,15 @@ impl VaultMcp {
                     })
                     .collect::<Result<Vec<_>, _>>()?;
                 let mut actions = Vec::new();
-                if decrypted.stored.has_capability("fill") {
+                if decrypted.stored.has_capability(&decrypted.secrets, "fill") {
                     actions.push("credential_fill".to_owned());
                 }
-                if connection_supports_action(&decrypted, Some("ssh-auth")) {
+                if decrypted.stored.has_capability(&decrypted.secrets, "ssh") {
                     actions.push("ssh_run".to_owned());
                     actions.push("ssh_upload".to_owned());
                     actions.push("ssh_download".to_owned());
                 }
-                if decrypted.stored.has_capability("http")
-                    || decrypted.stored.has_capability("fill")
-                {
+                if decrypted.stored.has_capability(&decrypted.secrets, "http") {
                     actions.push("http_send".to_owned());
                 }
                 Ok(ItemOutput {
@@ -325,6 +328,11 @@ impl VaultMcp {
         capability: Option<&str>,
     ) -> Result<DecryptedConnection, String> {
         let query = query.trim();
+        if query.is_empty()
+            && let Some(connection) = self.active_connection_for_action(capability)
+        {
+            return Ok(connection);
+        }
         let connections = self
             .vault
             .list_decrypted_connections()
@@ -335,9 +343,6 @@ impl VaultMcp {
             })
             .collect::<Vec<_>>();
         if query.is_empty() {
-            if let Some(connection) = self.active_connection_for_action(capability) {
-                return Ok(connection);
-            }
             return match connections.len() {
                 0 => Err(match capability {
                     Some(capability) => {
@@ -392,7 +397,7 @@ impl VaultMcp {
         port: Option<u16>,
         username: Option<&str>,
     ) -> Result<DecryptedConnection, String> {
-        let mut connection = self.resolve_item_for_action(item, Some("ssh-auth"))?;
+        let mut connection = self.resolve_item_for_action(item, Some("ssh"))?;
         if let Some(host) = host.map(str::trim).filter(|value| !value.is_empty()) {
             connection.stored.host = host.to_owned();
         }
@@ -482,18 +487,19 @@ impl VaultMcp {
 
 fn connection_supports_action(connection: &DecryptedConnection, capability: Option<&str>) -> bool {
     match capability {
-        None => !connection.stored.normalized_capabilities().is_empty(),
-        Some("ssh-auth") => {
-            connection.secrets.get("password").is_some()
-                || connection.secrets.get("privateKey").is_some()
-        }
-        Some(capability) => connection.stored.has_capability(capability),
+        None => !connection
+            .stored
+            .capabilities(&connection.secrets)
+            .is_empty(),
+        Some(capability) => connection
+            .stored
+            .has_capability(&connection.secrets, capability),
     }
 }
 
 fn action_label(capability: &str) -> &str {
     match capability {
-        "ssh-auth" => "SSH",
+        "ssh" => "SSH",
         capability => capability,
     }
 }
@@ -1950,7 +1956,7 @@ impl VaultMcp {
                     .or_insert(module);
             }
             let has_secret_bindings = !input.secret_bindings.is_empty();
-            let mut connection = self.resolve_item_for_action(&input.item, Some("fill"))?;
+            let mut connection = self.resolve_item_for_action(&input.item, Some("http"))?;
             let item_id = connection.stored.id;
             self.prepare_http_secret_bindings(&mut connection, &mut input)?;
             let request = ApiRequestInput {
@@ -2233,8 +2239,6 @@ mod tests {
                 auth_location: String::new(),
                 auth_prefix: String::new(),
                 api_auth_headers: vec![],
-                allowed_methods: vec![],
-                allowed_path_prefixes: vec![],
                 test_path: String::new(),
                 remove_secret_names: vec![],
                 secrets,
@@ -2355,8 +2359,6 @@ mod tests {
                 auth_location: String::new(),
                 auth_prefix: String::new(),
                 api_auth_headers: vec![],
-                allowed_methods: vec![],
-                allowed_path_prefixes: vec![],
                 test_path: String::new(),
                 remove_secret_names: vec![],
                 secrets: api_secrets,
@@ -2381,11 +2383,11 @@ mod tests {
                 .unwrap()
                 .stored
                 .name,
-            "test login api"
+            "test login"
         );
         assert_eq!(
             mcp.resolve_item_for_action("", None).unwrap().stored.name,
-            "test login api"
+            "test login"
         );
 
         let selected = structured_value(
@@ -2426,7 +2428,7 @@ mod tests {
         let vault = Vault::open(directory.path().join("vault")).unwrap();
         let mut secrets = SecretBundle::default();
         secrets.password = Some("runtime-ssh-password-marker".into());
-        vault
+        let public = vault
             .save_connection(ConnectionInput {
                 id: None,
                 modules: vec![ItemModule {
@@ -2443,13 +2445,13 @@ mod tests {
                 auth_location: String::new(),
                 auth_prefix: String::new(),
                 api_auth_headers: vec![],
-                allowed_methods: vec![],
-                allowed_path_prefixes: vec![],
                 test_path: String::new(),
                 remove_secret_names: vec![],
                 secrets,
             })
             .unwrap();
+        assert_eq!(public.capabilities, vec!["fill", "ssh", "http"]);
+        assert!(!public.can_test);
         let mcp = VaultMcp::new(vault);
 
         let listed = mcp
@@ -2582,8 +2584,6 @@ mod tests {
                 auth_location: String::new(),
                 auth_prefix: String::new(),
                 api_auth_headers: vec![],
-                allowed_methods: vec![],
-                allowed_path_prefixes: vec![],
                 test_path: String::new(),
                 remove_secret_names: vec![],
                 secrets,
@@ -2710,8 +2710,6 @@ mod tests {
                 auth_location: String::new(),
                 auth_prefix: String::new(),
                 api_auth_headers: vec![],
-                allowed_methods: vec![],
-                allowed_path_prefixes: vec![],
                 test_path: String::new(),
                 remove_secret_names: vec![],
                 secrets,
@@ -2781,8 +2779,6 @@ mod tests {
                 auth_location: String::new(),
                 auth_prefix: String::new(),
                 api_auth_headers: vec![],
-                allowed_methods: vec![],
-                allowed_path_prefixes: vec![],
                 test_path: String::new(),
                 remove_secret_names: vec![],
                 secrets,
@@ -2929,8 +2925,6 @@ mod tests {
                 auth_location: String::new(),
                 auth_prefix: String::new(),
                 api_auth_headers: vec![],
-                allowed_methods: vec![],
-                allowed_path_prefixes: vec![],
                 test_path: String::new(),
                 remove_secret_names: vec![],
                 secrets,
@@ -2955,8 +2949,6 @@ mod tests {
                 auth_location: String::new(),
                 auth_prefix: String::new(),
                 api_auth_headers: vec![],
-                allowed_methods: vec![],
-                allowed_path_prefixes: vec![],
                 test_path: String::new(),
                 remove_secret_names: vec![],
                 secrets: other_secrets,

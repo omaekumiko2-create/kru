@@ -677,12 +677,7 @@ async fn connect_ssh(
     .await
     .map_err(|error| anyhow::anyhow!(ssh_connect_error_message(&error)))?;
 
-    let ssh_auth_type = if connection.stored.ssh_auth_type.is_empty() {
-        connection.stored.auth_type.as_str()
-    } else {
-        connection.stored.ssh_auth_type.as_str()
-    };
-    let auth = if ssh_auth_type == "privateKey" {
+    let auth = if connection.stored.ssh_auth_type == "privateKey" {
         let username = connection
             .secrets
             .get("username")
@@ -1489,7 +1484,7 @@ fn validate_transfer_path(value: &str, label: &str) -> Result<String> {
 }
 
 pub async fn test_connection(vault: &Vault, connection: &DecryptedConnection) -> Result<String> {
-    if connection.stored.has_capability("ssh") {
+    if connection.stored.test_target(&connection.secrets) == Some("ssh") {
         let testable = DecryptedConnection {
             stored: connection.stored.clone(),
             secrets: connection.secrets.clone(),
@@ -1508,9 +1503,7 @@ pub async fn test_connection(vault: &Vault, connection: &DecryptedConnection) ->
             bail!("VPS 返回了意外结果：{}", result.stderr);
         }
         Ok("SSH 连接成功".to_owned())
-    } else if connection.stored.has_capability("http")
-        && !connection.stored.base_url.trim().is_empty()
-    {
+    } else if connection.stored.test_target(&connection.secrets) == Some("http") {
         let mut base = Url::parse(&connection.stored.base_url).context("API URL 无效")?;
         if !base.path().ends_with('/') {
             base.set_path(&format!("{}/", base.path()));
@@ -1623,12 +1616,7 @@ fn apply_api_auth(
     headers: &mut HeaderMap,
     target: &mut Url,
 ) -> Result<()> {
-    let auth_type = if connection.http_auth_type.is_empty() {
-        connection.auth_type.as_str()
-    } else {
-        connection.http_auth_type.as_str()
-    };
-    match auth_type {
+    match connection.http_auth_type.as_str() {
         "bearer" => {
             let prefix = if connection.auth_prefix.trim().is_empty() {
                 "Bearer"
@@ -1756,7 +1744,7 @@ pub(crate) fn shell_quote(value: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::model::{ApiAuthHeader, SecretEnvelope};
+    use crate::model::{ApiAuthHeader, ItemModule, SecretEnvelope};
     use axum::{
         Router,
         body::Bytes,
@@ -1772,8 +1760,6 @@ mod tests {
     fn stored(base_url: String) -> StoredConnection {
         StoredConnection {
             id: Uuid::new_v4(),
-            kind: "api".into(),
-            capabilities: vec!["fill".into(), "http".into()],
             modules: vec![],
             name: "local-api".into(),
             enabled: true,
@@ -1782,25 +1768,15 @@ mod tests {
             description: String::new(),
             host: String::new(),
             port: 0,
-            username: String::new(),
-            auth_type: "bearer".into(),
             ssh_auth_type: String::new(),
-            http_auth_type: String::new(),
+            http_auth_type: "bearer".into(),
             private_key_name: String::new(),
-            host_fingerprint: String::new(),
-            host_fingerprint_host: String::new(),
-            host_fingerprint_port: 0,
             base_url,
             auth_header: "X-API-Key".into(),
             auth_location: "header".into(),
             auth_prefix: String::new(),
             api_auth_headers: vec![],
-            allowed_methods: vec!["GET".into()],
-            allowed_path_prefixes: vec!["/v1/".into()],
             test_path: String::new(),
-            cli: None,
-            browser: None,
-            credential: None,
             secret: None,
             encrypted_secrets: SecretEnvelope {
                 version: 1,
@@ -1811,15 +1787,24 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn fill_only_item_does_not_offer_a_fake_connection_test() {
+    async fn runtime_target_item_does_not_offer_a_fake_connection_test() {
         let directory = tempdir().unwrap();
         let vault = Vault::open(directory.path().join("vault")).unwrap();
         let mut stored = stored(String::new());
-        stored.capabilities = vec!["fill".to_owned()];
-        let connection = DecryptedConnection {
-            stored,
-            secrets: SecretBundle::default(),
-        };
+        stored.modules.push(ItemModule {
+            kind: "password".to_owned(),
+            ..Default::default()
+        });
+        let mut secrets = SecretBundle::default();
+        secrets.password = Some("synthetic-runtime-password".to_owned());
+        let connection = DecryptedConnection { stored, secrets };
+        assert!(connection.stored.has_capability(&connection.secrets, "ssh"));
+        assert!(
+            connection
+                .stored
+                .has_capability(&connection.secrets, "http")
+        );
+        assert!(!connection.stored.public(Some(&connection.secrets)).can_test);
         assert_eq!(
             test_connection(&vault, &connection)
                 .await
@@ -2141,7 +2126,7 @@ mod tests {
                 .unwrap();
         });
         let mut item = stored(format!("http://{address}/v1/"));
-        item.auth_type = "apiKey".into();
+        item.http_auth_type = "apiKey".into();
         item.auth_location = "query".into();
         item.auth_header = "key".into();
         let mut secrets = SecretBundle::default();
@@ -2193,8 +2178,7 @@ mod tests {
                 .await
                 .unwrap();
         });
-        let mut stored = stored(format!("http://{address}/v1/"));
-        stored.allowed_methods = vec!["POST".into()];
+        let stored = stored(format!("http://{address}/v1/"));
         let mut secrets = SecretBundle::default();
         secrets.token = Some("vault-form-token-9384".into());
         let connection = DecryptedConnection { stored, secrets };
@@ -2289,7 +2273,7 @@ mod tests {
     #[test]
     fn custom_auth_headers_are_injected_from_named_secrets() {
         let mut item = stored("https://api.example.test/v1/".to_owned());
-        item.auth_type = "custom".into();
+        item.http_auth_type = "custom".into();
         item.api_auth_headers = vec![ApiAuthHeader {
             name: "X-Client-Secret".into(),
             secret_name: "apiHeader_client".into(),

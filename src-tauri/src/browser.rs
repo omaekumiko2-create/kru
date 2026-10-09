@@ -82,12 +82,6 @@ pub struct BrowserFillResult {
     pub message: String,
 }
 
-#[derive(Debug, Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct PairRequest {
-    code: String,
-}
-
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 struct PairResponse {
@@ -110,11 +104,8 @@ struct ExtensionMessage {
     message: String,
 }
 
-struct PairingCode {
-    value: String,
+struct PairingWindow {
     expires_at: std::time::Instant,
-    attempts: u8,
-    allow_claim: bool,
 }
 
 #[derive(Clone)]
@@ -168,7 +159,7 @@ struct BridgeServerState {
     port: u16,
     internal_token: String,
     extension_token: String,
-    pairing: Arc<Mutex<Option<PairingCode>>>,
+    pairing: Arc<Mutex<Option<PairingWindow>>>,
     extensions: Arc<Mutex<ExtensionPool>>,
     pending: Arc<Mutex<HashMap<Uuid, oneshot::Sender<BrowserFillResult>>>>,
     cancellation: CancellationToken,
@@ -266,17 +257,6 @@ impl BrowserBridge {
         }
     }
 
-    pub async fn fill_ready(&self) -> bool {
-        let Ok(settings) = self.vault.settings() else {
-            return false;
-        };
-        if !settings.browser_enabled || !settings.browser_paired {
-            return false;
-        }
-        self.ensure_started(settings.browser_port).await.is_ok()
-            && self.probe_fill_ready(settings.browser_port).await
-    }
-
     pub fn fill_configured(&self) -> bool {
         self.vault
             .settings()
@@ -291,31 +271,6 @@ impl BrowserBridge {
             .send()
             .await
             .is_ok_and(|response| response.status().is_success())
-    }
-
-    pub async fn create_pairing_code(&self) -> Result<String> {
-        let settings = self.vault.settings()?;
-        if !settings.browser_enabled {
-            bail!("请先启用 Browser Bridge");
-        }
-        self.ensure_started(settings.browser_port).await?;
-        let response = self
-            .client
-            .post(format!(
-                "http://127.0.0.1:{}/internal/pair-code",
-                settings.browser_port
-            ))
-            .bearer_auth(self.internal_token()?)
-            .send()
-            .await
-            .context("无法连接 Browser Bridge")?;
-        if !response.status().is_success() {
-            bail!(
-                "无法生成浏览器配对码：{}",
-                response.text().await.unwrap_or_default()
-            );
-        }
-        Ok(response.text().await?)
     }
 
     pub async fn start_quick_pairing(&self) -> Result<()> {
@@ -439,12 +394,10 @@ impl BrowserBridge {
                 };
                 let router = Router::new()
                     .route("/health", get(health))
-                    .route("/pair", post(pair))
                     .route("/claim", post(claim))
                     .route("/extension", get(extension_upgrade))
                     .route("/internal/health", get(internal_health))
                     .route("/internal/ready", get(internal_ready))
-                    .route("/internal/pair-code", post(create_pair_code))
                     .route("/internal/quick-pair", post(create_quick_pair))
                     .route("/internal/jobs", post(submit_job))
                     .route("/internal/reset", post(reset_pairing))
@@ -542,65 +495,15 @@ async fn internal_ready(
     }
 }
 
-async fn create_pair_code(
-    State(state): State<BridgeServerState>,
-    headers: HeaderMap,
-) -> Result<String, (StatusCode, String)> {
-    require_bearer(&headers, &state.internal_token)?;
-    let mut bytes = [0_u8; 4];
-    getrandom::fill(&mut bytes).map_err(internal_error)?;
-    let code = format!("{:06}", u32::from_le_bytes(bytes) % 1_000_000);
-    *state.pairing.lock().await = Some(PairingCode {
-        value: code.clone(),
-        expires_at: std::time::Instant::now() + Duration::from_secs(120),
-        attempts: 0,
-        allow_claim: false,
-    });
-    Ok(code)
-}
-
 async fn create_quick_pair(
     State(state): State<BridgeServerState>,
     headers: HeaderMap,
 ) -> Result<&'static str, (StatusCode, String)> {
     require_bearer(&headers, &state.internal_token)?;
-    *state.pairing.lock().await = Some(PairingCode {
-        value: String::new(),
+    *state.pairing.lock().await = Some(PairingWindow {
         expires_at: std::time::Instant::now() + Duration::from_secs(120),
-        attempts: 0,
-        allow_claim: true,
     });
     Ok("ready")
-}
-
-async fn pair(
-    State(state): State<BridgeServerState>,
-    Json(request): Json<PairRequest>,
-) -> Result<Json<PairResponse>, (StatusCode, String)> {
-    let mut pairing = state.pairing.lock().await;
-    let current = pairing
-        .as_mut()
-        .ok_or((StatusCode::UNAUTHORIZED, "没有待处理的配对".to_owned()))?;
-    if current.allow_claim {
-        return Err((StatusCode::UNAUTHORIZED, "当前已开启自动配对".to_owned()));
-    }
-    if std::time::Instant::now() > current.expires_at || current.attempts >= 5 {
-        *pairing = None;
-        return Err((StatusCode::UNAUTHORIZED, "配对码已过期".to_owned()));
-    }
-    current.attempts += 1;
-    if request.code.trim() != current.value {
-        return Err((StatusCode::UNAUTHORIZED, "配对码不正确".to_owned()));
-    }
-    *pairing = None;
-    state
-        .vault
-        .set_browser_paired(true)
-        .map_err(internal_error)?;
-    Ok(Json(PairResponse {
-        token: state.extension_token.clone(),
-        port: state.port,
-    }))
 }
 
 async fn claim(
@@ -621,7 +524,7 @@ async fn claim(
     let current = pairing
         .as_ref()
         .ok_or((StatusCode::UNAUTHORIZED, "没有待处理的配对".to_owned()))?;
-    if !current.allow_claim || std::time::Instant::now() > current.expires_at {
+    if std::time::Instant::now() > current.expires_at {
         *pairing = None;
         return Err((StatusCode::UNAUTHORIZED, "自动配对窗口已关闭".to_owned()));
     }
@@ -896,6 +799,10 @@ mod tests {
     use super::*;
     use tempfile::tempdir;
 
+    // These tests temporarily release an OS-assigned port before the bridge
+    // binds it. Serialize them so Windows cannot assign it to both bridges.
+    static BRIDGE_TEST_LOCK: Mutex<()> = Mutex::const_new(());
+
     fn test_server_state(vault: Vault) -> BridgeServerState {
         BridgeServerState {
             vault,
@@ -991,48 +898,8 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn pairing_rejects_wrong_code_and_returns_only_extension_token() {
-        let port = {
-            let listener = std::net::TcpListener::bind(("127.0.0.1", 0)).unwrap();
-            listener.local_addr().unwrap().port()
-        };
-        let directory = tempdir().unwrap();
-        let vault = Vault::open(directory.path().join("vault")).unwrap();
-        let mut settings = vault.settings().unwrap();
-        settings.browser_enabled = true;
-        settings.browser_port = port;
-        vault.update_settings(settings).unwrap();
-        let bridge = BrowserBridge::new(vault.clone());
-        bridge.sync().await;
-        let code = bridge.create_pairing_code().await.unwrap();
-        let client = reqwest::Client::new();
-        let bad = client
-            .post(format!("http://127.0.0.1:{port}/pair"))
-            .json(&serde_json::json!({"code":"999999"}))
-            .send()
-            .await
-            .unwrap();
-        assert_eq!(bad.status(), StatusCode::UNAUTHORIZED);
-        let paired = client
-            .post(format!("http://127.0.0.1:{port}/pair"))
-            .json(&serde_json::json!({"code":code}))
-            .send()
-            .await
-            .unwrap();
-        assert_eq!(paired.status(), StatusCode::OK);
-        let payload: serde_json::Value = paired.json().await.unwrap();
-        assert!(
-            payload["token"]
-                .as_str()
-                .is_some_and(|token| token.len() > 20)
-        );
-        assert!(payload.get("internalToken").is_none());
-        assert!(vault.settings().unwrap().browser_paired);
-        bridge.stop().await;
-    }
-
-    #[tokio::test]
     async fn quick_pairing_requires_a_chromium_extension_origin() {
+        let _guard = BRIDGE_TEST_LOCK.lock().await;
         let port = {
             let listener = std::net::TcpListener::bind(("127.0.0.1", 0)).unwrap();
             listener.local_addr().unwrap().port()
@@ -1045,9 +912,25 @@ mod tests {
         vault.update_settings(settings).unwrap();
         let bridge = BrowserBridge::new(vault.clone());
         bridge.sync().await;
+        let client = reqwest::Client::new();
+        let claim_url = format!("http://127.0.0.1:{port}/claim");
+        let before_window = client
+            .post(&claim_url)
+            .header(header::ORIGIN, "chrome-extension://abcdefghijklmnop")
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(before_window.status(), StatusCode::UNAUTHORIZED);
+        for removed_path in ["pair", "internal/pair-code"] {
+            let response = client
+                .post(format!("http://127.0.0.1:{port}/{removed_path}"))
+                .send()
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::NOT_FOUND);
+        }
         bridge.start_quick_pairing().await.unwrap();
 
-        let client = reqwest::Client::new();
         let web_page = client
             .post(format!("http://127.0.0.1:{port}/claim"))
             .header(header::ORIGIN, "https://example.com")
@@ -1069,12 +952,43 @@ mod tests {
                 .as_str()
                 .is_some_and(|token| token.len() > 20)
         );
+        assert!(payload.get("internalToken").is_none());
+        assert_ne!(
+            payload["token"].as_str().unwrap(),
+            bridge.internal_token().unwrap()
+        );
         assert!(vault.settings().unwrap().browser_paired);
+        let reused = client
+            .post(&claim_url)
+            .header(header::ORIGIN, "chrome-extension://abcdefghijklmnop")
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(reused.status(), StatusCode::UNAUTHORIZED);
         bridge.stop().await;
     }
 
     #[tokio::test]
+    async fn quick_pairing_rejects_an_expired_window() {
+        let directory = tempdir().unwrap();
+        let state = test_server_state(Vault::open(directory.path().join("vault")).unwrap());
+        *state.pairing.lock().await = Some(PairingWindow {
+            expires_at: std::time::Instant::now() - Duration::from_secs(1),
+        });
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            header::ORIGIN,
+            "chrome-extension://abcdefghijklmnop".parse().unwrap(),
+        );
+        let (status, _) = claim(State(state.clone()), headers).await.unwrap_err();
+        assert_eq!(status, StatusCode::UNAUTHORIZED);
+        assert!(state.pairing.lock().await.is_none());
+        assert!(!state.vault.settings().unwrap().browser_paired);
+    }
+
+    #[tokio::test]
     async fn activated_extension_receives_the_job_and_a_standby_takes_over() {
+        let _guard = BRIDGE_TEST_LOCK.lock().await;
         use tokio_tungstenite::tungstenite::Message as ClientMessage;
 
         let port = {
@@ -1091,7 +1005,7 @@ mod tests {
         let bridge = BrowserBridge::new(vault);
         bridge.sync().await;
         assert!(bridge.fill_configured());
-        assert!(!bridge.fill_ready().await);
+        assert!(!bridge.status().await.connected);
 
         let url = format!("ws://127.0.0.1:{port}/extension");
         let auth = serde_json::json!({
@@ -1115,7 +1029,7 @@ mod tests {
                 .contains("ready")
         );
         sleep(Duration::from_millis(20)).await;
-        assert!(bridge.fill_ready().await);
+        assert!(bridge.status().await.connected);
         assert!(bridge.status().await.connected);
 
         let (mut second, _) = tokio_tungstenite::connect_async(&url).await.unwrap();

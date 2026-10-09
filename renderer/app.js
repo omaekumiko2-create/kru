@@ -85,7 +85,7 @@ const staticCopy = [
   ['.template-copy strong', 'text', '从一个组合开始', 'START WITH A PRESET'],
   ['.template-copy small', 'text', '模板只添加模块，不会限制之后的修改。', 'Templates only add modules; you can change anything afterward.'],
   ['.module-editor-heading > div > strong', 'text', '项目模块', 'ITEM MODULES'],
-  ['.module-editor-heading > div > small', 'text', '拖动模块的非按钮区域调整顺序 · 开关控制 Agent 可见性', 'DRAG ANY NON-BUTTON AREA TO REORDER · SWITCH CONTROLS AGENT VISIBILITY'],
+  ['.module-editor-heading > div > small', 'text', '拖动把手排序 · 开关控制 Agent 可见性', 'DRAG HANDLE TO REORDER · SWITCH CONTROLS AGENT VISIBILITY'],
   ['#add-module-button', 'text', '＋ 添加模块', '+ ADD MODULE'],
   ['#module-menu [data-add-module="username"]', 'text', '账号', 'USERNAME'],
   ['#module-menu [data-add-module="password"]', 'text', '密码', 'PASSWORD'],
@@ -196,6 +196,7 @@ let editorOpenedFromDraft = false;
 let editorInitialSnapshot = '';
 let agentClients = [];
 let agentRestartRequired = false;
+let renderedConnectionsSignature = '';
 const ACTIVITY_PAGE_SIZE = 50;
 let activityVisibleCount = ACTIVITY_PAGE_SIZE;
 let activityMatchCount = 0;
@@ -203,6 +204,9 @@ let activityLoadPending = false;
 const expandedActivityErrors = new Set();
 let ownerLockState = { pinConfigured: false, unlocked: false, expiresInSeconds: 0 };
 let ownerPinSetupRequested = false;
+let confirmationResolver = null;
+let confirmationPreviousFocus = null;
+let confirmationInertElements = [];
 const scrollThumbBindings = [];
 let scrollSyncQueued = false;
 
@@ -257,7 +261,43 @@ function toast(message, type = '') {
   setTimeout(() => item.remove(), 3200);
 }
 
+function finishConfirmation(accepted, restoreFocus = true) {
+  if (!confirmationResolver) return;
+  const resolve = confirmationResolver;
+  confirmationResolver = null;
+  $('#confirmation-modal').classList.add('hidden');
+  confirmationInertElements.forEach((element) => { element.inert = false; });
+  confirmationInertElements = [];
+  if (restoreFocus) {
+    let previousFocus = confirmationPreviousFocus;
+    if (!previousFocus?.isConnected && previousFocus?.dataset.action && previousFocus?.dataset.id) {
+      previousFocus = $$('[data-action][data-id]').find((button) => button.dataset.action === confirmationPreviousFocus.dataset.action && button.dataset.id === confirmationPreviousFocus.dataset.id);
+    }
+    if (previousFocus?.isConnected && !previousFocus.closest('.hidden')) previousFocus.focus();
+    else if ($('#connection-modal').classList.contains('hidden')) $('#add-connection-button').focus();
+  }
+  confirmationPreviousFocus = null;
+  resolve(accepted);
+}
+
+function confirmDestructiveAction({ title, message, acceptLabel = localized('删除', 'DELETE'), tag = localized('确认删除', 'CONFIRM DELETION') }) {
+  if (confirmationResolver) return Promise.resolve(false);
+  finishModulePointerDrag(false);
+  $('#confirmation-tag').textContent = tag;
+  $('#confirmation-title').textContent = title;
+  $('#confirmation-message').textContent = message;
+  $('#confirmation-cancel').textContent = localized('取消', 'CANCEL');
+  $('#confirmation-accept').textContent = acceptLabel;
+  confirmationPreviousFocus = document.activeElement;
+  confirmationInertElements = [...document.body.children].filter((element) => element !== $('#confirmation-modal') && !element.inert && !['SCRIPT', 'STYLE'].includes(element.tagName));
+  confirmationInertElements.forEach((element) => { element.inert = true; });
+  $('#confirmation-modal').classList.remove('hidden');
+  requestAnimationFrame(() => { if (confirmationResolver) $('#confirmation-cancel').focus(); });
+  return new Promise((resolve) => { confirmationResolver = resolve; });
+}
+
 function clearOwnerPlaintext() {
+  finishConfirmation(false, false);
   closeEditor();
   currentModules.forEach((module) => { module.secretValue = ''; });
   $$('[data-secret-value]').forEach((input) => { input.value = ''; });
@@ -475,8 +515,8 @@ function renderMetrics() {
 function itemDetail(item) {
   const capabilities = itemCapabilities(item);
   const targets = [];
-  if (capabilities.includes('ssh')) targets.push(`${item.host}:${item.port}`);
-  if (capabilities.includes('http')) targets.push(item.baseUrl || localized('运行时 URL', 'RUNTIME URL'));
+  if (capabilities.includes('ssh') && item.host) targets.push(`${item.host}:${item.port || 22}`);
+  if (capabilities.includes('http') && item.baseUrl) targets.push(item.baseUrl);
   if (targets.length) return targets.join(' · ');
   const count = (item.modules || []).filter((module) => module.secret).length || item.secret?.fields?.length || 0;
   return capabilities.includes('fill')
@@ -485,19 +525,7 @@ function itemDetail(item) {
 }
 
 function itemCapabilities(item) {
-  const raw = Array.isArray(item.capabilities) ? item.capabilities : [];
-  if (raw.length) return [...new Set(raw.map((value) => value === 'api' ? 'http' : value).filter((value) => ['fill', 'ssh', 'http'].includes(value)))];
-  const modules = Array.isArray(item.modules) ? item.modules : [];
-  if (modules.length) {
-    const configured = (kind) => modules.some((module) => module.kind === kind && module.configured);
-    const valued = (kind) => modules.some((module) => module.kind === kind && String(module.value || '').trim());
-    const capabilities = [];
-    if (modules.some((module) => module.secret && module.configured)) capabilities.push('fill');
-    if (valued('host') && valued('port') && configured('username') && (configured('password') || configured('privateKey'))) capabilities.push('ssh');
-    if (configured('apiCredential')) capabilities.push('http');
-    return capabilities;
-  }
-  return item.type === 'ssh' ? ['fill', 'ssh'] : item.type === 'api' ? ['fill', 'http'] : item.type ? ['fill'] : [];
+  return Array.isArray(item.capabilities) ? item.capabilities : [];
 }
 
 function itemAuthModule(item) {
@@ -508,7 +536,7 @@ function itemAuthModule(item) {
 
 function itemPermission(item) {
   const capabilities = itemCapabilities(item);
-  if (capabilities.includes('http')) return (item.allowedMethods || []).join(' · ') || 'GET';
+  if (capabilities.includes('http')) return 'HTTP';
   if (capabilities.includes('ssh')) return 'SSH';
   return capabilities.includes('fill') ? 'FOCUS INPUT' : 'NOT EXPOSED';
 }
@@ -533,6 +561,9 @@ function syncActivityFilterControl() {
 
 function renderConnections() {
   const query = normalizeSearch(pageSearch.connections);
+  const signature = JSON.stringify([state.connections, query, language]);
+  if (signature === renderedConnectionsSignature) return;
+  renderedConnectionsSignature = signature;
   const items = state.connections.filter((item) => {
     if (!query) return true;
     const fields = (item.secret?.fields || []).map((field) => field.name).join(' ');
@@ -548,8 +579,7 @@ function renderConnections() {
   container.innerHTML = items.map((item) => {
     const stableIndex = state.connections.findIndex((candidate) => candidate.id === item.id) + 1;
     const authModule = itemAuthModule(item);
-    const capabilities = itemCapabilities(item);
-    const canTest = item.enabled && (capabilities.includes('ssh') || (capabilities.includes('http') && item.baseUrl));
+    const canTest = item.enabled && item.canTest;
     return `<article class="connection-card ${itemCapabilities(item).includes('ssh') ? 'ssh' : itemCapabilities(item).includes('http') ? 'http' : 'fill'} ${item.enabled ? '' : 'disabled'}">
       <div class="module-strip"><span>ITEM / ${String(stableIndex).padStart(2, '0')}</span><button class="module-state" type="button" data-action="toggle-enabled" data-id="${item.id}" aria-pressed="${item.enabled}" title="${item.enabled ? localized('点击停用；Agent 将无法使用其中的秘密', 'Disable this item; agents will no longer be able to use its secrets') : localized('点击启用；Agent 将可以使用其中的秘密', 'Enable this item so agents can use its secrets')}"><i class="status-dot ${item.enabled ? '' : 'off'}"></i>${item.enabled ? 'READY' : 'OFF'}</button></div>
       <div class="connection-top"><div class="connection-main"><div class="connection-name-row"><span class="connection-name"><span>${escapeHtml(item.name)}</span></span></div><div class="connection-address">${escapeHtml(itemDetail(item))}</div></div><div class="connection-symbol">${escapeHtml(authModule)}</div></div>
@@ -767,23 +797,12 @@ function syncModuleDraft() {
   });
 }
 
-function editorModule(kind) {
-  return currentModules.find((module) => module.kind === kind);
-}
-
-function moduleConfigured(module) {
-  return Boolean(module && (String(module.secretValue || '').length || module.configured || module.pending));
-}
-
-function updateModuleStatus() {
-  syncModuleDraft();
-}
-
 function renderModules() {
+  finishModulePointerDrag(false);
   const container = $('#module-list');
   if (!currentModules.length) {
     container.innerHTML = `<div class="module-empty"><b>EMPTY / DRAFT</b><span>${localized('选择模板或添加任意模块', 'Choose a template or add any module')}</span></div>`;
-    updateModuleStatus();
+    syncModuleDraft();
     return;
   }
   container.innerHTML = currentModules.map((module, index) => {
@@ -814,9 +833,10 @@ function renderModules() {
       actions = `<span class="module-action-spacer" aria-hidden="true"></span>${secretActionButton('copy', false)}`;
     }
     const removeLabel = localized('删除模块', 'Remove module');
-    return `<div class="module-row" data-module-index="${index}" data-kind="${escapeHtml(module.kind)}" data-name="${escapeHtml(module.name || '')}" data-existing="${Boolean(module.existing)}" data-configured="${Boolean(module.configured)}" data-private-key-name="${escapeHtml(module.privateKeyName || '')}" data-pending="${Boolean(module.pending)}"><button type="button" class="module-agent-toggle" data-module-agent-visible aria-pressed="${agentVisible}" aria-label="${agentVisibilityLabel}" title="${agentVisibilityLabel}"><i aria-hidden="true"></i></button><div class="module-identity">${customName}</div><div class="module-control">${control}</div><div class="module-actions ${actions ? 'full' : 'single'}">${actions}<button type="button" class="remove-module module-action-icon" data-remove-module aria-label="${removeLabel}" title="${removeLabel}"><svg viewBox="0 0 20 20" aria-hidden="true"><path d="M3 5.5h14M7.5 5.5V3.25h5v2.25M5.25 5.5l.75 11h8l.75-11M8.25 8.5v5M11.75 8.5v5"/></svg></button></div></div>`;
+    const reorderLabel = localized('拖动调整顺序，或聚焦后按上/下方向键', 'Drag to reorder, or focus and use the Up/Down arrow keys');
+    return `<div class="module-row" data-module-index="${index}" data-kind="${escapeHtml(module.kind)}" data-name="${escapeHtml(module.name || '')}" data-existing="${Boolean(module.existing)}" data-configured="${Boolean(module.configured)}" data-private-key-name="${escapeHtml(module.privateKeyName || '')}" data-pending="${Boolean(module.pending)}"><button type="button" class="module-drag-handle" data-module-drag-handle aria-label="${reorderLabel}" title="${reorderLabel}" aria-keyshortcuts="ArrowUp ArrowDown"><svg viewBox="0 0 12 20" aria-hidden="true"><path d="M4 5h.01M8 5h.01M4 10h.01M8 10h.01M4 15h.01M8 15h.01"/></svg></button><button type="button" class="module-agent-toggle" data-module-agent-visible aria-pressed="${agentVisible}" aria-label="${agentVisibilityLabel}" title="${agentVisibilityLabel}"><i aria-hidden="true"></i></button><div class="module-identity">${customName}</div><div class="module-control">${control}</div><div class="module-actions ${actions ? 'full' : 'single'}">${actions}<button type="button" class="remove-module module-action-icon" data-remove-module aria-label="${removeLabel}" title="${removeLabel}"><svg viewBox="0 0 20 20" aria-hidden="true"><path d="M3 5.5h14M7.5 5.5V3.25h5v2.25M5.25 5.5l.75 11h8l.75-11M8.25 8.5v5M11.75 8.5v5"/></svg></button></div></div>`;
   }).join('');
-  updateModuleStatus();
+  syncModuleDraft();
 }
 
 function secretActionButton(kind, secret = true, disabled = false) {
@@ -900,10 +920,6 @@ function applyTemplate(template) {
   renderModules();
 }
 
-function updateAuthFields() {
-  updateModuleStatus();
-}
-
 function value(selector, next) {
   const element = $(selector);
   if (arguments.length > 1) element.value = next ?? '';
@@ -956,6 +972,7 @@ async function openEditor(item = null, draft = null) {
 }
 
 function closeEditor() {
+  finishModulePointerDrag(false);
   $('#connection-modal').classList.add('hidden');
   setModuleMenu(false);
   editorSourceInput = null;
@@ -1009,11 +1026,11 @@ function serializeItem(validate = true) {
     authLocation: editorSourceInput?.authLocation || '',
     authPrefix: editorSourceInput?.authPrefix || '',
     apiAuthHeaders: editorSourceInput?.apiAuthHeaders || [],
-    allowedMethods: editorSourceInput?.allowedMethods || [],
-    allowedPathPrefixes: editorSourceInput?.allowedPathPrefixes || [],
     testPath: editorSourceInput?.testPath || '',
     privateKeyImportPath: collected.privateKeyImportPath,
-    removeSecretNames: [...removedSecretFields],
+    // A newly entered replacement must not be deleted by the earlier removal.
+    removeSecretNames: [...removedSecretFields].filter((name) => !currentModules.some((module) =>
+      moduleSecretName(module) === name && (module.secretValue || module.pending))),
     secrets: collected.secrets,
   };
 }
@@ -1095,7 +1112,12 @@ async function savePinSettings() {
     renderOwnerLock();
     return;
   }
-  if (!confirm(localized('关闭 PIN 锁会移除当前 PIN。继续？', 'Turning off the PIN lock removes the current PIN. Continue?'))) {
+  if (!await confirmDestructiveAction({
+    title: localized('关闭 PIN 锁？', 'Turn off PIN lock?'),
+    message: localized('当前 PIN 将被移除；再次开启时需要设置新 PIN。', 'The current PIN will be removed. You will need to set a new PIN when enabling the lock again.'),
+    acceptLabel: localized('关闭并移除', 'TURN OFF'),
+    tag: localized('确认移除 PIN', 'CONFIRM PIN REMOVAL'),
+  })) {
     toggle.checked = true;
     return;
   }
@@ -1125,7 +1147,7 @@ async function setLanguage(next) {
     state.settings.language = language;
     renderOwnerLock();
     render();
-    updateAuthFields();
+    syncModuleDraft();
     if (!$('#connection-modal').classList.contains('hidden')) renderModules();
     if (!$('#connection-modal').classList.contains('hidden')) updateEditorTitle();
     try {
@@ -1195,11 +1217,16 @@ document.addEventListener('click', async (event) => {
   }
   const deleteDraftButton = event.target.closest('#delete-draft-button');
   if (deleteDraftButton && editorDrafts[0]) {
-    if (!confirm(localized('删除当前草稿？此操作无法撤销。', 'Delete the current draft? This cannot be undone.'))) return;
+    const draftId = editorDrafts[0].id;
+    if (!await confirmDestructiveAction({
+      title: localized('删除当前草稿？', 'Delete this draft?'),
+      message: localized('草稿中的未保存内容将永久丢失。', 'Unsaved content in this draft will be permanently lost.'),
+    })) return;
     try {
-      await api.deleteDraft(editorDrafts[0].id);
-      editorDrafts = editorDrafts.slice(1);
+      await api.deleteDraft(draftId);
+      editorDrafts = editorDrafts.filter((draft) => draft.id !== draftId);
       renderDrafts();
+      $('#add-connection-button').focus();
       toast(localized('草稿已删除', 'Draft deleted'));
     } catch (error) { toast(cleanError(error), 'error'); }
     return;
@@ -1263,11 +1290,23 @@ document.addEventListener('click', async (event) => {
   const removeModuleButton = event.target.closest('[data-remove-module]');
   if (removeModuleButton) {
     syncModuleDraft();
-    const index = Number(removeModuleButton.closest('.module-row').dataset.moduleIndex);
+    const row = removeModuleButton.closest('.module-row');
+    const index = Number(row.dataset.moduleIndex);
     const removed = currentModules[index];
+    if (!removed) return;
+    const moduleName = removed.kind === 'customSecret' && removed.name.trim() ? removed.name.trim() : moduleLabel(removed.kind);
+    if (!await confirmDestructiveAction({
+      title: localized(`删除“${moduleName}”模块？`, `Delete the "${moduleName}" module?`),
+      message: removed?.existing
+        ? localized('保存项目后，该模块及其加密值将永久删除。', 'After you save the item, this module and its encrypted value will be permanently deleted.')
+        : localized('该模块中尚未保存的内容将丢失。', 'Unsaved content in this module will be lost.'),
+    })) return;
+    if (!row.isConnected || $('#connection-modal').classList.contains('hidden')) return;
     if (removed?.existing && moduleSecretName(removed)) removedSecretFields.add(moduleSecretName(removed));
     currentModules.splice(index, 1);
     renderModules();
+    const remainingRows = $$('.module-row', $('#module-list'));
+    ($('[data-remove-module]', remainingRows[Math.min(index, remainingRows.length - 1)] || $('#module-list')) || $('#add-module-button')).focus();
   }
   const action = event.target.closest('[data-action]');
   if (action?.dataset.action === 'clear-connection-filters') {
@@ -1301,8 +1340,11 @@ document.addEventListener('click', async (event) => {
     if (action.dataset.action === 'test') {
       try { toast(publicMessage(await api.test(item.id), localized('连接测试完成', 'Connection test complete'))); await refresh(false); } catch (error) { toast(cleanError(error), 'error'); }
     }
-    if (action.dataset.action === 'delete' && confirm(localized(`删除“${item.name}”？此操作不可恢复。`, `Delete "${item.name}"? This cannot be undone.`))) {
-      try { await api.remove(item.id); toast(localized('项目已删除', 'Item deleted')); await refresh(); } catch (error) { toast(cleanError(error), 'error'); }
+    if (action.dataset.action === 'delete' && await confirmDestructiveAction({
+      title: localized(`删除“${item.name}”？`, `Delete "${item.name}"?`),
+      message: localized('项目及其全部加密秘密将永久删除，此操作无法撤销。', 'The item and all of its encrypted secrets will be permanently deleted. This cannot be undone.'),
+    })) {
+      try { await api.remove(item.id); toast(localized('项目已删除', 'Item deleted')); await refresh(); $('#add-connection-button').focus(); } catch (error) { toast(cleanError(error), 'error'); }
     }
   }
   const activityFilter = event.target.closest('[data-activity-filter]');
@@ -1328,8 +1370,17 @@ document.addEventListener('click', async (event) => {
   }
   const agentAction = event.target.closest('[data-agent-action]');
   if (agentAction) {
+    const kind = agentAction.dataset.agentAction;
+    if (kind === 'remove') {
+      const client = agentClients.find((candidate) => candidate.clientId === agentAction.dataset.clientId);
+      if (!await confirmDestructiveAction({
+        title: localized(`移除 ${client?.displayName || 'Agent'} 的 KRU 接入？`, `Remove KRU from ${client?.displayName || 'this agent'}?`),
+        message: localized('将删除该 Agent 的 KRU MCP 配置；之后可以重新连接。', 'This removes the KRU MCP configuration from the agent. You can connect it again later.'),
+        acceptLabel: localized('移除', 'REMOVE'),
+        tag: localized('确认移除接入', 'CONFIRM INTEGRATION REMOVAL'),
+      })) return;
+    }
     try {
-      const kind = agentAction.dataset.agentAction;
       const result = kind === 'connect'
         ? (await api.registerAgents([agentAction.dataset.clientId]))[0]
         : kind === 'repair'
@@ -1353,7 +1404,7 @@ document.addEventListener('input', (event) => {
       inputs[inputs.indexOf(event.target) + 1]?.focus();
     }
   }
-  if (event.target.closest('.module-row')) updateModuleStatus();
+  if (event.target.closest('.module-row')) syncModuleDraft();
   const page = event.target.dataset.pageSearch;
   if (!page) return;
   pageSearch[page] = event.target.value;
@@ -1432,15 +1483,44 @@ function finishModulePointerDrag(commit) {
   draggedModuleRow = null;
   modulePointerDrag = null;
   clearModuleDropSeam();
-  if (started) syncModuleDraft();
+  if (started && commit) {
+    syncModuleDraft();
+    $('[data-module-drag-handle]', row)?.focus({ preventScroll: true });
+    announceModuleOrder(row);
+  }
 }
 
-moduleList.addEventListener('dragstart', (event) => event.preventDefault());
+function announceModuleOrder(row) {
+  const rows = $$('.module-row', moduleList);
+  const name = $('[data-module-name]', row)?.value.trim() || moduleLabel(row.dataset.kind);
+  const position = rows.indexOf(row) + 1;
+  $('#module-reorder-status').textContent = localized(`${name}：第 ${position} 项，共 ${rows.length} 项`, `${name}: position ${position} of ${rows.length}`);
+}
+
+moduleList.addEventListener('dragstart', (event) => {
+  if (event.target.closest?.('[data-module-drag-handle]')) event.preventDefault();
+});
 moduleList.addEventListener('pointerdown', (event) => {
-  if (event.button !== 0 || !event.isPrimary || event.target.closest?.('button')) return;
-  const row = event.target.closest?.('.module-row');
-  if (!row) return;
+  if (event.button !== 0 || !event.isPrimary || confirmationResolver) return;
+  const handle = event.target.closest?.('[data-module-drag-handle]');
+  const row = handle?.closest('.module-row');
+  if (!row || modulePointerDrag) return;
+  event.preventDefault();
+  handle.focus({ preventScroll: true });
   modulePointerDrag = { row, pointerId: event.pointerId, startX: event.clientX, startY: event.clientY, started: false };
+});
+moduleList.addEventListener('keydown', (event) => {
+  const handle = event.target.closest?.('[data-module-drag-handle]');
+  if (!handle || confirmationResolver || modulePointerDrag || !['ArrowUp', 'ArrowDown'].includes(event.key)) return;
+  event.preventDefault();
+  const row = handle.closest('.module-row');
+  const sibling = event.key === 'ArrowUp' ? row.previousElementSibling : row.nextElementSibling;
+  if (!sibling) return;
+  moduleList.insertBefore(row, event.key === 'ArrowUp' ? sibling : sibling.nextElementSibling);
+  syncModuleDraft();
+  handle.focus({ preventScroll: true });
+  row.scrollIntoView({ block: 'nearest' });
+  announceModuleOrder(row);
 });
 document.addEventListener('pointermove', (event) => {
   if (!modulePointerDrag || event.pointerId !== modulePointerDrag.pointerId) return;
@@ -1486,6 +1566,25 @@ document.addEventListener('paste', (event) => {
 });
 
 document.addEventListener('keydown', (event) => {
+  if (confirmationResolver) {
+    if (event.key === 'Escape') {
+      event.preventDefault();
+      finishConfirmation(false);
+      return;
+    }
+    if (event.key === 'Tab') {
+      const buttons = [$('#confirmation-cancel'), $('#confirmation-accept')];
+      const index = buttons.indexOf(document.activeElement);
+      event.preventDefault();
+      buttons[(index + (event.shiftKey ? -1 : 1) + buttons.length) % buttons.length].focus();
+    }
+    return;
+  }
+  if (event.key === 'Escape' && modulePointerDrag) {
+    event.preventDefault();
+    finishModulePointerDrag(false);
+    return;
+  }
   if (event.target.matches('.pin-cell-input')) {
     const inputs = $$('.pin-cell-input', event.target.closest('.pin-control'));
     const index = inputs.indexOf(event.target);
@@ -1569,7 +1668,26 @@ $('#owner-pin-cancel').addEventListener('click', () => {
   renderOwnerLock();
   renderSettings();
 });
-$('#clear-activity-button').addEventListener('click', async () => { if (!confirm(localized('清空本地操作记录？', 'Clear the local activity log?'))) return; await api.clear(); currentActivityFilter = 'all'; pageSearch.activity = ''; expandedActivityErrors.clear(); $('[data-page-search="activity"]').value = ''; await refresh(); });
+$('#confirmation-modal').addEventListener('click', (event) => {
+  if (event.target === $('#confirmation-modal') || event.target.closest('#confirmation-cancel')) finishConfirmation(false);
+  if (event.target.closest('#confirmation-accept')) finishConfirmation(true);
+});
+$('#clear-activity-button').addEventListener('click', async () => {
+  if (!await confirmDestructiveAction({
+    title: localized('清空本地操作记录？', 'Clear the local activity log?'),
+    message: localized('全部本地操作记录将永久删除。', 'All local activity entries will be permanently deleted.'),
+    acceptLabel: localized('清空', 'CLEAR'),
+    tag: localized('确认清空记录', 'CONFIRM LOG DELETION'),
+  })) return;
+  try {
+    await api.clear();
+    currentActivityFilter = 'all';
+    pageSearch.activity = '';
+    expandedActivityErrors.clear();
+    $('[data-page-search="activity"]').value = '';
+    await refresh();
+  } catch (error) { toast(cleanError(error), 'error'); }
+});
 $('#save-browser-settings-button').addEventListener('click', saveBrowserSettings);
 $('#browser-enabled').addEventListener('change', saveBrowserSettings);
 if (!isMacOS) $('#desktop-shortcut-enabled').addEventListener('change', (event) => setSystemIntegration('desktop', event.currentTarget.checked));
@@ -1577,7 +1695,15 @@ $('#launch-at-login-enabled').addEventListener('change', (event) => setSystemInt
 $('#pin-enabled').addEventListener('change', savePinSettings);
 $('#close-behavior').addEventListener('change', saveDesktopSettings);
 $('#quick-pairing-button').addEventListener('click', async () => { try { const message = await api.quickPair(Number($('#browser-port').value)); $('#browser-enabled').checked = true; toast(publicMessage(message, localized('浏览器配对已准备', 'Browser pairing is ready'))); await refresh(); } catch (error) { toast(cleanError(error), 'error'); } });
-$('#reset-pairing-button').addEventListener('click', async () => { if (!confirm(localized('重置后所有已配对扩展会立即失效。继续？', 'Resetting immediately revokes every paired extension. Continue?'))) return; try { await api.resetPair(); toast(localized('配对已重置', 'Pairing reset')); await refresh(); } catch (error) { toast(cleanError(error), 'error'); } });
+$('#reset-pairing-button').addEventListener('click', async () => {
+  if (!await confirmDestructiveAction({
+    title: localized('重置浏览器配对？', 'Reset browser pairing?'),
+    message: localized('所有已配对扩展会立即失效，需要重新配对才能继续使用。', 'Every paired extension will be revoked immediately and must be paired again.'),
+    acceptLabel: localized('重置', 'RESET'),
+    tag: localized('确认重置配对', 'CONFIRM PAIRING RESET'),
+  })) return;
+  try { await api.resetPair(); toast(localized('配对已重置', 'Pairing reset')); await refresh(); } catch (error) { toast(cleanError(error), 'error'); }
+});
 $('#open-extension-button').addEventListener('click', () => api.extensionFolder().catch((error) => toast(cleanError(error), 'error')));
 $('#open-data-button').addEventListener('click', () => api.dataFolder().catch((error) => toast(cleanError(error), 'error')));
 $('#rescan-agents').addEventListener('click', () => scanAgents(true));

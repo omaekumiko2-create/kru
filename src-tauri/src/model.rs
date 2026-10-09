@@ -67,53 +67,6 @@ mod settings_tests {
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct CliParameterSpec {
-    pub name: String,
-    pub label: String,
-    #[serde(default)]
-    pub required: bool,
-    #[serde(default)]
-    pub pattern: String,
-    #[serde(default = "default_parameter_length")]
-    pub max_length: usize,
-    #[serde(default)]
-    pub allow_leading_dash: bool,
-}
-
-fn default_parameter_length() -> usize {
-    200
-}
-
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct CliEnvBinding {
-    pub variable: String,
-    pub secret_name: String,
-}
-
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct CliAction {
-    pub id: String,
-    pub label: String,
-    #[serde(default)]
-    pub args: Vec<String>,
-    #[serde(default)]
-    pub parameters: Vec<CliParameterSpec>,
-    #[serde(default)]
-    pub env: Vec<CliEnvBinding>,
-    #[serde(default)]
-    pub stdin_secret: String,
-    #[serde(default = "default_cli_timeout")]
-    pub timeout_seconds: u64,
-}
-
-fn default_cli_timeout() -> u64 {
-    60
-}
-
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(transparent)]
 pub struct NamedSecrets(pub BTreeMap<String, String>);
 
@@ -150,50 +103,6 @@ impl NamedSecrets {
     pub fn iter(&self) -> impl Iterator<Item = (&String, &String)> {
         self.0.iter()
     }
-}
-
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct CliProfile {
-    pub executable_path: String,
-    #[serde(default)]
-    pub working_directory: String,
-    #[serde(default)]
-    pub secret_names: Vec<String>,
-    #[serde(default)]
-    pub actions: Vec<CliAction>,
-}
-
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct BrowserSelectors {
-    #[serde(default)]
-    pub username: String,
-    #[serde(default)]
-    pub password: String,
-    #[serde(default)]
-    pub totp: String,
-    #[serde(default)]
-    pub submit: String,
-}
-
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct BrowserProfile {
-    pub origin: String,
-    #[serde(default)]
-    pub username: String,
-    #[serde(default)]
-    pub selectors: BrowserSelectors,
-}
-
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct CredentialProfile {
-    #[serde(default)]
-    pub username: String,
-    #[serde(default)]
-    pub bound_executable: String,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -325,14 +234,6 @@ impl SecretBundle {
         .collect()
     }
 
-    pub fn has_auth_secret(&self) -> bool {
-        self.password.as_ref().is_some_and(|v| !v.is_empty())
-            || self.private_key.as_ref().is_some_and(|v| !v.is_empty())
-            || self.token.as_ref().is_some_and(|v| !v.is_empty())
-            || self.api_key.as_ref().is_some_and(|v| !v.is_empty())
-            || self.named_secrets.values().any(|value| !value.is_empty())
-    }
-
     pub fn get(&self, name: &str) -> Option<&str> {
         let standard = match name {
             "password" => self.password.as_deref(),
@@ -399,10 +300,6 @@ impl SecretBundle {
 #[serde(rename_all = "camelCase")]
 pub struct StoredConnection {
     pub id: Uuid,
-    #[serde(default, rename = "type", skip_serializing_if = "String::is_empty")]
-    pub kind: String,
-    #[serde(default)]
-    pub capabilities: Vec<String>,
     #[serde(default)]
     pub modules: Vec<ItemModule>,
     pub name: String,
@@ -417,21 +314,11 @@ pub struct StoredConnection {
     #[serde(default = "default_ssh_port")]
     pub port: u16,
     #[serde(default)]
-    pub username: String,
-    #[serde(default)]
-    pub auth_type: String,
-    #[serde(default)]
     pub ssh_auth_type: String,
     #[serde(default)]
     pub http_auth_type: String,
     #[serde(default)]
     pub private_key_name: String,
-    #[serde(default)]
-    pub host_fingerprint: String,
-    #[serde(default)]
-    pub host_fingerprint_host: String,
-    #[serde(default)]
-    pub host_fingerprint_port: u16,
 
     #[serde(default)]
     pub base_url: String,
@@ -444,17 +331,7 @@ pub struct StoredConnection {
     #[serde(default)]
     pub api_auth_headers: Vec<ApiAuthHeader>,
     #[serde(default)]
-    pub allowed_methods: Vec<String>,
-    #[serde(default)]
-    pub allowed_path_prefixes: Vec<String>,
-    #[serde(default)]
     pub test_path: String,
-    #[serde(default)]
-    pub cli: Option<CliProfile>,
-    #[serde(default)]
-    pub browser: Option<BrowserProfile>,
-    #[serde(default)]
-    pub credential: Option<CredentialProfile>,
     #[serde(default)]
     pub secret: Option<SecretProfile>,
 
@@ -484,15 +361,10 @@ pub struct PortableConnection {
     pub description: String,
     pub http_auth_type: String,
     pub private_key_name: String,
-    pub host_fingerprint: String,
-    pub host_fingerprint_host: String,
-    pub host_fingerprint_port: u16,
     pub auth_header: String,
     pub auth_location: String,
     pub auth_prefix: String,
     pub api_auth_headers: Vec<ApiAuthHeader>,
-    pub allowed_methods: Vec<String>,
-    pub allowed_path_prefixes: Vec<String>,
     pub test_path: String,
 }
 
@@ -500,10 +372,8 @@ pub struct PortableConnection {
 #[serde(rename_all = "camelCase")]
 pub struct PublicConnection {
     pub id: Uuid,
-    #[serde(default, rename = "type", skip_serializing_if = "String::is_empty")]
-    pub kind: String,
-    #[serde(default = "default_item_capabilities")]
     pub capabilities: Vec<String>,
+    pub can_test: bool,
     #[serde(default)]
     pub modules: Vec<PublicItemModule>,
     pub name: String,
@@ -513,15 +383,11 @@ pub struct PublicConnection {
     pub description: String,
     pub host: String,
     pub port: u16,
-    pub username: String,
-    pub auth_type: String,
     #[serde(default)]
     pub ssh_auth_type: String,
     #[serde(default)]
     pub http_auth_type: String,
     pub private_key_name: String,
-    pub has_private_key: bool,
-    pub host_fingerprint: String,
     pub base_url: String,
     pub auth_header: String,
     #[serde(default)]
@@ -530,40 +396,71 @@ pub struct PublicConnection {
     pub auth_prefix: String,
     #[serde(default)]
     pub api_auth_headers: Vec<ApiAuthHeader>,
-    pub allowed_methods: Vec<String>,
-    pub allowed_path_prefixes: Vec<String>,
     pub test_path: String,
     #[serde(default)]
-    pub cli: Option<CliProfile>,
-    #[serde(default)]
-    pub browser: Option<BrowserProfile>,
-    #[serde(default)]
-    pub credential: Option<CredentialProfile>,
-    #[serde(default)]
     pub secret: Option<SecretProfile>,
-    #[serde(default)]
-    pub executable_available: bool,
-    #[serde(default)]
-    pub secret_names: Vec<String>,
-    pub has_secret: bool,
 }
 
 impl StoredConnection {
-    pub fn normalized_capabilities(&self) -> Vec<String> {
-        normalize_item_capabilities(&self.capabilities, &self.kind)
+    fn module_configured(&self, secrets: &SecretBundle, kind: &str) -> bool {
+        self.modules.iter().any(|module| {
+            module.kind == kind
+                && module
+                    .secret_name()
+                    .and_then(|name| secrets.get(name))
+                    .is_some()
+        })
     }
 
-    pub fn has_capability(&self, capability: &str) -> bool {
-        self.normalized_capabilities()
+    pub fn capabilities(&self, secrets: &SecretBundle) -> Vec<String> {
+        let can_fill = self.modules.iter().any(|module| {
+            module
+                .secret_name()
+                .and_then(|name| secrets.get(name))
+                .is_some()
+        });
+        let mut capabilities = Vec::new();
+        if can_fill {
+            capabilities.push("fill".to_owned());
+        }
+        if self.module_configured(secrets, "password")
+            || self.module_configured(secrets, "privateKey")
+        {
+            capabilities.push("ssh".to_owned());
+        }
+        if can_fill {
+            capabilities.push("http".to_owned());
+        }
+        capabilities
+    }
+
+    pub fn has_capability(&self, secrets: &SecretBundle, capability: &str) -> bool {
+        self.capabilities(secrets)
             .iter()
             .any(|candidate| candidate == capability)
+    }
+
+    pub fn test_target(&self, secrets: &SecretBundle) -> Option<&'static str> {
+        if self.has_capability(secrets, "ssh")
+            && !self.host.trim().is_empty()
+            && self.port > 0
+            && self.module_configured(secrets, "username")
+        {
+            Some("ssh")
+        } else if self.has_capability(secrets, "http") && !self.base_url.trim().is_empty() {
+            Some("http")
+        } else {
+            None
+        }
     }
 
     pub fn public(&self, secrets: Option<&SecretBundle>) -> PublicConnection {
         PublicConnection {
             id: self.id,
-            kind: String::new(),
-            capabilities: self.normalized_capabilities(),
+            capabilities: secrets
+                .map(|bundle| self.capabilities(bundle))
+                .unwrap_or_default(),
+            can_test: secrets.is_some_and(|bundle| self.test_target(bundle).is_some()),
             modules: self
                 .modules
                 .iter()
@@ -594,70 +491,22 @@ impl StoredConnection {
             description: self.description.clone(),
             host: self.host.clone(),
             port: self.port,
-            // Usernames are secrets in v3. The public model never exposes them.
-            username: String::new(),
-            auth_type: self.auth_type.clone(),
             ssh_auth_type: self.ssh_auth_type.clone(),
             http_auth_type: self.http_auth_type.clone(),
             private_key_name: self.private_key_name.clone(),
-            has_private_key: secrets.and_then(|s| s.private_key.as_ref()).is_some(),
-            host_fingerprint: self.host_fingerprint.clone(),
             base_url: self.base_url.clone(),
             auth_header: self.auth_header.clone(),
             auth_location: self.auth_location.clone(),
             auth_prefix: self.auth_prefix.clone(),
             api_auth_headers: self.api_auth_headers.clone(),
-            allowed_methods: self.allowed_methods.clone(),
-            allowed_path_prefixes: self.allowed_path_prefixes.clone(),
             test_path: self.test_path.clone(),
-            cli: None,
-            browser: None,
-            credential: None,
             secret: Some(SecretProfile {
                 fields: secrets
                     .map(|bundle| bundle.available_fields(self.secret.as_ref()))
                     .unwrap_or_default(),
             }),
-            executable_available: true,
-            secret_names: secrets
-                .map(|bundle| bundle.named_secrets.keys().cloned().collect())
-                .unwrap_or_default(),
-            has_secret: secrets.is_some_and(SecretBundle::has_auth_secret),
         }
     }
-}
-
-fn default_item_capabilities() -> Vec<String> {
-    vec!["fill".to_owned()]
-}
-
-pub fn normalize_item_capabilities(values: &[String], legacy_kind: &str) -> Vec<String> {
-    let mut capabilities = Vec::new();
-    let recognized = values
-        .iter()
-        .any(|value| matches!(value.as_str(), "fill" | "ssh" | "api" | "http"));
-    if recognized {
-        capabilities.push("fill".to_owned());
-    }
-    for value in values {
-        let capability = match value.as_str() {
-            "ssh" => "ssh",
-            "api" | "http" => "http",
-            _ => continue,
-        };
-        if !capabilities.iter().any(|item| item == capability) {
-            capabilities.push(capability.to_owned());
-        }
-    }
-    if capabilities.is_empty() {
-        match legacy_kind {
-            "ssh" => capabilities.extend(["fill".to_owned(), "ssh".to_owned()]),
-            "api" => capabilities.extend(["fill".to_owned(), "http".to_owned()]),
-            "secret" | "browser" | "credential" | "cli" => capabilities.push("fill".to_owned()),
-            _ => {}
-        }
-    }
-    capabilities
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -685,10 +534,6 @@ pub struct ConnectionInput {
     pub auth_prefix: String,
     #[serde(default)]
     pub api_auth_headers: Vec<ApiAuthHeader>,
-    #[serde(default)]
-    pub allowed_methods: Vec<String>,
-    #[serde(default)]
-    pub allowed_path_prefixes: Vec<String>,
     #[serde(default)]
     pub test_path: String,
     #[serde(default)]

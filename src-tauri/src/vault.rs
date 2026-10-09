@@ -2,18 +2,16 @@ use crate::{
     api_catalog,
     crypto::{MasterKey, create_owner_pin_verifier, verify_owner_pin},
     model::{
-        Activity, ApiAuthHeader, AppState, ConnectionInput, ImportSummary, ItemModule, McpState,
-        NewActivity, OwnerEditorDraft, OwnerSecretField, OwnerSecretView, PortableConnection,
-        PublicConnection, SecretBundle, SecretField, SecretProfile, SecurityState, Settings,
-        SettingsPatch, StoredConnection, StoredEditorDraft, VaultDocument,
-        module_kind_has_plaintext_reveal,
+        Activity, AppState, ConnectionInput, ImportSummary, ItemModule, McpState, NewActivity,
+        OwnerEditorDraft, OwnerSecretField, OwnerSecretView, PortableConnection, PublicConnection,
+        SecretBundle, SecretField, SecretProfile, SecurityState, Settings, SettingsPatch,
+        StoredConnection, StoredEditorDraft, VaultDocument, module_kind_has_plaintext_reveal,
     },
 };
 use anyhow::{Context, Result, bail};
 use atomic_write_file::AtomicWriteFile;
 use chrono::Utc;
 use fs2::FileExt;
-use reqwest::Method;
 use std::{
     fs::{self, File, OpenOptions},
     io::Write,
@@ -24,6 +22,7 @@ use url::Url;
 use uuid::Uuid;
 
 const MAX_ACTIVITIES: usize = 3_000;
+const VAULT_VERSION: u8 = 8;
 
 #[derive(Clone)]
 pub struct Vault {
@@ -68,7 +67,7 @@ impl Vault {
 
             if !vault.inner.vault_path.exists() {
                 let document = VaultDocument {
-                    version: 7,
+                    version: VAULT_VERSION,
                     settings: Settings::default(),
                     browser_bridge_secret: None,
                     owner_pin: None,
@@ -78,7 +77,7 @@ impl Vault {
                 };
                 vault.with_exclusive_lock(|_| vault.write_document_unlocked(&document))?;
             } else {
-                vault.require_v7()?;
+                vault.require_supported_version()?;
             }
             Ok(vault)
         })();
@@ -94,13 +93,13 @@ impl Vault {
         self.inner.key.source()
     }
 
-    fn require_v7(&self) -> Result<()> {
+    fn require_supported_version(&self) -> Result<()> {
         let bytes = fs::read(&self.inner.vault_path).context("无法读取保险库")?;
         let document: VaultDocument =
             serde_json::from_slice(&bytes).context("保险库文件格式无效")?;
-        if document.version != 7 {
+        if !matches!(document.version, 7 | VAULT_VERSION) {
             bail!(
-                "KRU 0.15 仅支持模块化 v7 保险库；当前文件版本为 {}",
+                "KRU 仅支持模块化 v7 或 v8 保险库；当前文件版本为 {}",
                 document.version
             );
         }
@@ -265,16 +264,18 @@ impl Vault {
     }
 
     pub fn browser_bridge_secret(&self) -> Result<String> {
-        self.update_document_with_result(|document| {
-            if document.browser_bridge_secret.is_none() {
-                document.browser_bridge_secret = Some(self.inner.key.encrypt(&random_token()?)?);
+        if let Some(secret) = self.read_document()?.browser_bridge_secret {
+            return self.inner.key.decrypt(&secret);
+        }
+        self.with_exclusive_lock(|_| {
+            let mut document = self.read_document_unlocked()?;
+            if let Some(secret) = document.browser_bridge_secret.as_ref() {
+                return self.inner.key.decrypt(secret);
             }
-            self.inner.key.decrypt(
-                document
-                    .browser_bridge_secret
-                    .as_ref()
-                    .context("Browser Bridge 密钥缺失")?,
-            )
+            let secret = random_token()?;
+            document.browser_bridge_secret = Some(self.inner.key.encrypt(&secret)?);
+            self.write_document_unlocked(&document)?;
+            Ok(secret)
         })
     }
 
@@ -441,13 +442,8 @@ impl Vault {
             prepare_auto_api(&mut input, &mut secrets)?;
 
             let now = Utc::now().to_rfc3339();
-            let mut stored = normalize_connection_v7(
-                input,
-                existing.as_ref(),
-                &secrets,
-                imported_key_name,
-                now,
-            )?;
+            let mut stored =
+                normalize_connection(input, existing.as_ref(), &secrets, imported_key_name, now)?;
             stored.encrypted_secrets = self.inner.key.encrypt(&secrets)?;
             let public = stored.public(Some(&secrets));
             if let Some(index) = existing_index {
@@ -575,15 +571,10 @@ impl Vault {
                         description: connection.description,
                         http_auth_type: connection.http_auth_type,
                         private_key_name: connection.private_key_name,
-                        host_fingerprint: connection.host_fingerprint,
-                        host_fingerprint_host: connection.host_fingerprint_host,
-                        host_fingerprint_port: connection.host_fingerprint_port,
                         auth_header: connection.auth_header,
                         auth_location: connection.auth_location,
                         auth_prefix: connection.auth_prefix,
                         api_auth_headers: connection.api_auth_headers,
-                        allowed_methods: connection.allowed_methods,
-                        allowed_path_prefixes: connection.allowed_path_prefixes,
                         test_path: connection.test_path,
                     },
                     secrets,
@@ -677,11 +668,14 @@ impl Vault {
 
     fn read_document_unlocked(&self) -> Result<VaultDocument> {
         let bytes = fs::read(&self.inner.vault_path).context("无法读取保险库")?;
-        let document: VaultDocument =
+        let mut document: VaultDocument =
             serde_json::from_slice(&bytes).context("保险库文件格式无效")?;
-        if document.version != 7 {
+        if !matches!(document.version, 7 | VAULT_VERSION) {
             bail!("不支持的保险库版本 {}", document.version);
         }
+        // Reading v7 is harmless; the next actual write uses the compact v8
+        // schema so older processes cannot mistake it for their own model.
+        document.version = VAULT_VERSION;
         Ok(document)
     }
 
@@ -832,48 +826,6 @@ fn module_secret_configured(modules: &[ItemModule], secrets: &SecretBundle, kind
         .is_some()
 }
 
-fn derive_capabilities(
-    modules: &[ItemModule],
-    secrets: &SecretBundle,
-    http_auth_type: &str,
-    api_auth_headers: &[ApiAuthHeader],
-) -> Vec<String> {
-    let mut capabilities = Vec::new();
-    if modules.iter().any(|module| {
-        module
-            .secret_name()
-            .and_then(|name| secrets.get(name))
-            .is_some()
-    }) {
-        capabilities.push("fill".to_owned());
-    }
-    let port_ready = module_value(modules, "port")
-        .and_then(|value| value.parse::<u16>().ok())
-        .is_some_and(|port| port > 0);
-    if module_value(modules, "host").is_some()
-        && port_ready
-        && module_secret_configured(modules, secrets, "username")
-        && (module_secret_configured(modules, secrets, "password")
-            || module_secret_configured(modules, secrets, "privateKey"))
-    {
-        capabilities.push("ssh".to_owned());
-    }
-    let api_ready = module_secret_configured(modules, secrets, "apiCredential");
-    let basic_ready = http_auth_type == "basic"
-        && module_value(modules, "url").is_some()
-        && module_secret_configured(modules, secrets, "username")
-        && module_secret_configured(modules, secrets, "password");
-    let custom_ready = http_auth_type == "custom"
-        && !api_auth_headers.is_empty()
-        && api_auth_headers
-            .iter()
-            .all(|header| secrets.get(&header.secret_name).is_some());
-    if api_ready || basic_ready || custom_ready {
-        capabilities.push("http".to_owned());
-    }
-    capabilities
-}
-
 fn module_fields(modules: &[ItemModule]) -> Vec<SecretField> {
     modules
         .iter()
@@ -939,7 +891,7 @@ fn fallback_item_name(
     }
 }
 
-fn normalize_connection_v7(
+fn normalize_connection(
     input: ConnectionInput,
     existing: Option<&StoredConnection>,
     secrets: &SecretBundle,
@@ -983,14 +935,9 @@ fn normalize_connection_v7(
     }
     .to_owned();
     let http_auth_type = input.http_auth_type.clone();
-    let capabilities =
-        derive_capabilities(&modules, secrets, &http_auth_type, &input.api_auth_headers);
-    let allowed_methods = normalize_http_methods(input.allowed_methods)?;
     let name = fallback_item_name(&input.name, id, &modules, secrets);
     Ok(StoredConnection {
         id,
-        kind: String::new(),
-        capabilities,
         modules: modules.clone(),
         name,
         enabled: input.enabled,
@@ -999,8 +946,6 @@ fn normalize_connection_v7(
         description: checked_text(&input.description, "项目说明", 240)?,
         host,
         port,
-        username: String::new(),
-        auth_type: http_auth_type.clone(),
         ssh_auth_type,
         http_auth_type,
         private_key_name: if modules.iter().any(|module| module.kind == "privateKey") {
@@ -1008,20 +953,12 @@ fn normalize_connection_v7(
         } else {
             String::new()
         },
-        host_fingerprint: String::new(),
-        host_fingerprint_host: String::new(),
-        host_fingerprint_port: 0,
         base_url,
         auth_header: input.auth_header.trim().to_owned(),
         auth_location: input.auth_location.trim().to_owned(),
         auth_prefix: input.auth_prefix.trim().to_owned(),
         api_auth_headers: input.api_auth_headers,
-        allowed_methods,
-        allowed_path_prefixes: normalize_trimmed_list(input.allowed_path_prefixes),
         test_path: input.test_path.trim().to_owned(),
-        cli: None,
-        browser: None,
-        credential: None,
         secret: Some(SecretProfile {
             fields: module_fields(&modules),
         }),
@@ -1046,13 +983,11 @@ fn stored_from_portable(
         auth_location: portable.auth_location.clone(),
         auth_prefix: portable.auth_prefix.clone(),
         api_auth_headers: portable.api_auth_headers.clone(),
-        allowed_methods: portable.allowed_methods.clone(),
-        allowed_path_prefixes: portable.allowed_path_prefixes.clone(),
         test_path: portable.test_path.clone(),
         remove_secret_names: Vec::new(),
         secrets: secrets.clone(),
     };
-    let mut stored = normalize_connection_v7(
+    let mut stored = normalize_connection(
         input,
         None,
         secrets,
@@ -1206,11 +1141,6 @@ fn prepare_auto_api(input: &mut ConnectionInput, secrets: &mut SecretBundle) -> 
     input.auth_location = profile.auth_location.to_owned();
     input.auth_prefix = profile.auth_prefix.to_owned();
     input.api_auth_headers.clear();
-    input.allowed_methods = ["GET", "POST", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS"]
-        .into_iter()
-        .map(str::to_owned)
-        .collect();
-    input.allowed_path_prefixes.clear();
     input.test_path.clear();
     Ok(())
 }
@@ -1239,36 +1169,6 @@ fn reserved_secret_name(value: &str) -> bool {
             | "token"
             | "apikey"
     )
-}
-
-fn normalize_http_methods(values: Vec<String>) -> Result<Vec<String>> {
-    let mut output = Vec::new();
-    for value in values {
-        let value = value.trim().to_ascii_uppercase();
-        if value.is_empty() || output.contains(&value) {
-            continue;
-        }
-        Method::from_bytes(value.as_bytes()).with_context(|| format!("HTTP 方法无效：{value}"))?;
-        output.push(value);
-    }
-    if output.is_empty() {
-        output = ["GET", "POST", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS"]
-            .into_iter()
-            .map(str::to_owned)
-            .collect();
-    }
-    Ok(output)
-}
-
-fn normalize_trimmed_list(values: Vec<String>) -> Vec<String> {
-    let mut output = Vec::new();
-    for value in values {
-        let value = value.trim().to_owned();
-        if !value.is_empty() && !output.contains(&value) {
-            output.push(value);
-        }
-    }
-    output
 }
 
 fn checked_text(value: &str, label: &str, max_chars: usize) -> Result<String> {
@@ -1363,8 +1263,6 @@ mod tests {
             auth_location: "header".to_owned(),
             auth_prefix: String::new(),
             api_auth_headers: vec![],
-            allowed_methods: vec!["GET".to_owned()],
-            allowed_path_prefixes: vec!["/v1/".to_owned()],
             test_path: "/health".to_owned(),
             remove_secret_names: vec![],
             secrets,
@@ -1408,8 +1306,6 @@ mod tests {
             auth_location: String::new(),
             auth_prefix: String::new(),
             api_auth_headers: vec![],
-            allowed_methods: vec![],
-            allowed_path_prefixes: vec![],
             test_path: String::new(),
             remove_secret_names: vec![],
             secrets,
@@ -1428,11 +1324,9 @@ mod tests {
         let contents = fs::read_to_string(vault_dir.join("vault.json")).unwrap();
         assert!(!contents.contains("unique-secret-marker-9437"));
         let stored_json: serde_json::Value = serde_json::from_str(&contents).unwrap();
+        assert_eq!(stored_json["version"], VAULT_VERSION);
         assert!(stored_json["connections"][0].get("type").is_none());
-        assert_eq!(
-            stored_json["connections"][0]["capabilities"],
-            serde_json::json!(["fill", "http"])
-        );
+        assert!(stored_json["connections"][0].get("capabilities").is_none());
         assert!(serde_json::from_str::<VaultDocument>(&contents).is_ok());
         let public = vault.list_connections().unwrap();
         let serialized = serde_json::to_string(&public).unwrap();
@@ -1443,6 +1337,111 @@ mod tests {
             public_json[0]["capabilities"],
             serde_json::json!(["fill", "http"])
         );
+    }
+
+    #[test]
+    fn v7_vault_upgrades_on_write_without_changing_secrets() {
+        let directory = tempdir().unwrap();
+        let vault_dir = directory.path().join("vault");
+        let vault = Vault::open(vault_dir.clone()).unwrap();
+        let saved = vault
+            .save_connection(api_input(None, "Existing API", "existing-secret-marker"))
+            .unwrap();
+        let path = vault_dir.join("vault.json");
+        let mut fixture: serde_json::Value =
+            serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+        fixture["version"] = serde_json::json!(7);
+        let encrypted = fixture["connections"][0]["encryptedSecrets"].clone();
+        let obsolete = serde_json::json!({
+            "type": "ssh",
+            "capabilities": ["ssh"],
+            "username": "",
+            "authType": "obsolete",
+            "hostFingerprint": "unused",
+            "hostFingerprintHost": "unused.test",
+            "hostFingerprintPort": 22,
+            "allowedMethods": ["GET"],
+            "allowedPathPrefixes": ["/old"],
+            "cli": {"executablePath": "old-tool", "actions": []},
+            "browser": {"origin": "https://old.test"},
+            "credential": {"boundExecutable": "old-tool"}
+        });
+        fixture["connections"][0]
+            .as_object_mut()
+            .unwrap()
+            .extend(obsolete.as_object().unwrap().clone());
+        let old_bytes = serde_json::to_vec_pretty(&fixture).unwrap();
+        fs::write(&path, &old_bytes).unwrap();
+        drop(vault);
+
+        let reopened = Vault::open(vault_dir.clone()).unwrap();
+        let public = reopened.list_connections().unwrap();
+        assert_eq!(public[0].capabilities, ["fill", "http"]);
+        assert!(public[0].can_test);
+        assert_eq!(fs::read(&path).unwrap(), old_bytes);
+        reopened.set_connection_enabled(saved.id, false).unwrap();
+        let rewritten: serde_json::Value =
+            serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+        assert_eq!(rewritten["version"], VAULT_VERSION);
+        for name in obsolete.as_object().unwrap().keys() {
+            assert!(rewritten["connections"][0].get(name).is_none(), "{name}");
+        }
+        assert_eq!(rewritten["connections"][0]["encryptedSecrets"], encrypted);
+        drop(reopened);
+        let reopened = Vault::open(vault_dir).unwrap();
+        assert_eq!(
+            reopened
+                .get_connection(saved.id)
+                .unwrap()
+                .secrets
+                .get("apiCredential"),
+            Some("existing-secret-marker")
+        );
+    }
+
+    #[test]
+    fn runtime_capabilities_and_saved_test_targets_are_distinct() {
+        let directory = tempdir().unwrap();
+        let vault = Vault::open(directory.path().join("vault")).unwrap();
+        let mut input = ssh_input(None);
+        input.modules.retain(|module| module.kind == "password");
+        let saved = vault.save_connection(input).unwrap();
+        assert_eq!(saved.capabilities, ["fill", "ssh", "http"]);
+        assert!(!saved.can_test);
+
+        let mut input = ssh_input(Some(saved.id));
+        let saved = vault.save_connection(input.clone()).unwrap();
+        assert!(saved.can_test);
+        let stored = vault.get_connection(saved.id).unwrap();
+        assert_eq!(stored.stored.test_target(&stored.secrets), Some("ssh"));
+
+        input.modules.retain(|module| module.kind != "port");
+        input.modules.push(ItemModule {
+            kind: "url".into(),
+            value: "https://example.test".into(),
+            ..Default::default()
+        });
+        let saved = vault.save_connection(input).unwrap();
+        assert!(saved.can_test);
+        let stored = vault.get_connection(saved.id).unwrap();
+        assert_eq!(stored.stored.test_target(&stored.secrets), Some("http"));
+    }
+
+    #[test]
+    fn reading_an_existing_browser_secret_does_not_rewrite_the_vault() {
+        let directory = tempdir().unwrap();
+        let vault = Vault::open(directory.path().join("vault")).unwrap();
+        let secret = vault.browser_bridge_secret().unwrap();
+        let path = vault.data_dir().join("vault.json");
+        // A normal write prettifies the document; preserve compact bytes to
+        // detect even a rewrite that leaves all logical values unchanged.
+        let document: serde_json::Value =
+            serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+        let compact = serde_json::to_vec(&document).unwrap();
+        fs::write(&path, &compact).unwrap();
+
+        assert_eq!(vault.browser_bridge_secret().unwrap(), secret);
+        assert_eq!(fs::read(path).unwrap(), compact);
     }
 
     #[test]
@@ -1501,7 +1500,7 @@ mod tests {
         let addressless = vault.save_connection(input).unwrap();
         assert_eq!(addressless.name, "Addressless API");
         assert!(addressless.base_url.is_empty());
-        assert_eq!(addressless.auth_type, "bearer");
+        assert_eq!(addressless.http_auth_type, "bearer");
 
         let mut input = api_input(None, "Example", "another-api-secret");
         input.http_auth_type = "auto".to_owned();
@@ -1545,7 +1544,7 @@ mod tests {
         });
 
         let saved = vault.save_connection(input).unwrap();
-        assert_eq!(saved.capabilities, vec!["fill", "http"]);
+        assert_eq!(saved.capabilities, vec!["fill", "ssh", "http"]);
         assert_eq!(saved.http_auth_type, "basic");
         assert_eq!(saved.base_url, "https://api.example.test/v1");
     }
@@ -1556,14 +1555,11 @@ mod tests {
         let vault = Vault::open(directory.path().join("vault")).unwrap();
         let mut input = api_input(None, "Configured API", "configured-api-secret");
         input.auth_prefix = "Token".to_owned();
-        input.allowed_methods.push("PROPFIND".to_owned());
         let saved = vault.save_connection(input).unwrap();
 
         assert_eq!(saved.http_auth_type, "bearer");
         assert_eq!(saved.auth_header, "X-API-Key");
         assert_eq!(saved.auth_prefix, "Token");
-        assert_eq!(saved.allowed_methods, vec!["GET", "PROPFIND"]);
-        assert_eq!(saved.allowed_path_prefixes, vec!["/v1/"]);
         assert_eq!(saved.test_path, "/health");
     }
 
@@ -1572,7 +1568,6 @@ mod tests {
         let directory = tempdir().unwrap();
         let vault = Vault::open(directory.path().join("vault")).unwrap();
         let long_url = format!("https://example.test/{}", "route/".repeat(120));
-        let long_prefix = format!("/{}", "scope/".repeat(80));
         let long_test_path = format!("/{}", "health/".repeat(80));
         let long_auth_prefix = "CustomAuthorizationPrefix".repeat(4);
         let mut input = api_input(None, "Long API configuration", "long-api-secret");
@@ -1582,31 +1577,17 @@ mod tests {
             .find(|module| module.kind == "url")
             .unwrap()
             .value = long_url.clone();
-        input.allowed_methods = vec!["get".to_owned(), "PROPFIND".to_owned()];
-        input.allowed_path_prefixes = vec![long_prefix.clone()];
         input.test_path = long_test_path.clone();
         input.auth_prefix = long_auth_prefix.clone();
 
         let saved = vault.save_connection(input).unwrap();
         assert_eq!(saved.base_url, long_url);
-        assert_eq!(saved.allowed_methods, vec!["GET", "PROPFIND"]);
-        assert_eq!(saved.allowed_path_prefixes, vec![long_prefix]);
         assert_eq!(saved.test_path, long_test_path);
         assert_eq!(saved.auth_prefix, long_auth_prefix);
-
-        let mut invalid = api_input(None, "Invalid method", "invalid-method-secret");
-        invalid.allowed_methods = vec!["NOT VALID".to_owned()];
-        assert!(
-            vault
-                .save_connection(invalid)
-                .unwrap_err()
-                .to_string()
-                .contains("HTTP 方法无效")
-        );
     }
 
     #[test]
-    fn v7_modules_derive_mixed_actions_and_keep_incomplete_items_as_drafts() {
+    fn modules_derive_mixed_actions_and_keep_incomplete_items_as_drafts() {
         let directory = tempdir().unwrap();
         let vault = Vault::open(directory.path().join("vault")).unwrap();
         let mut mixed = ssh_input(None);
@@ -1746,7 +1727,7 @@ mod tests {
         drop(vault);
 
         let error = Vault::open(vault_dir).err().expect("version 6 must fail");
-        assert!(format!("{error:#}").contains("仅支持模块化 v7"));
+        assert!(format!("{error:#}").contains("仅支持模块化 v7 或 v8"));
     }
 
     #[test]
@@ -1766,7 +1747,7 @@ mod tests {
         vault.save_connection(update).unwrap();
         let after = vault.get_connection(saved.id).unwrap();
         assert!(after.secrets.get("password").is_none());
-        assert!(!after.stored.capabilities.iter().any(|value| value == "ssh"));
+        assert!(!after.stored.has_capability(&after.secrets, "ssh"));
     }
 
     #[test]
@@ -1942,8 +1923,6 @@ mod tests {
                 auth_location: String::new(),
                 auth_prefix: String::new(),
                 api_auth_headers: vec![],
-                allowed_methods: vec![],
-                allowed_path_prefixes: vec![],
                 test_path: String::new(),
                 remove_secret_names: vec![],
                 secrets: {
@@ -1997,8 +1976,6 @@ mod tests {
             auth_location: String::new(),
             auth_prefix: String::new(),
             api_auth_headers: vec![],
-            allowed_methods: vec![],
-            allowed_path_prefixes: vec![],
             test_path: String::new(),
             remove_secret_names,
             secrets,

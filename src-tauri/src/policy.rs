@@ -65,12 +65,7 @@ pub fn redact(mut value: String, connection: &StoredConnection, secrets: &Secret
     if let Some(token) = &secrets.token {
         candidates.push(format!("Bearer {token}"));
     }
-    let http_auth_type = if connection.http_auth_type.is_empty() {
-        connection.auth_type.as_str()
-    } else {
-        connection.http_auth_type.as_str()
-    };
-    if http_auth_type == "basic" {
+    if connection.http_auth_type == "basic" {
         if let (Some(username), Some(password)) = (secrets.get("username"), &secrets.password) {
             candidates.push(STANDARD.encode(format!("{username}:{password}")));
         }
@@ -114,8 +109,6 @@ mod tests {
     fn connection() -> StoredConnection {
         StoredConnection {
             id: Uuid::new_v4(),
-            kind: "api".into(),
-            capabilities: vec!["fill".into(), "http".into()],
             modules: vec![],
             name: "test".into(),
             enabled: true,
@@ -124,25 +117,15 @@ mod tests {
             description: String::new(),
             host: String::new(),
             port: 0,
-            username: String::new(),
-            auth_type: "bearer".into(),
             ssh_auth_type: String::new(),
             http_auth_type: "bearer".into(),
             private_key_name: String::new(),
-            host_fingerprint: String::new(),
-            host_fingerprint_host: String::new(),
-            host_fingerprint_port: 0,
             base_url: "https://api.example.com/v1/".into(),
             auth_header: "X-API-Key".into(),
             auth_location: "header".into(),
             auth_prefix: String::new(),
             api_auth_headers: vec![],
-            allowed_methods: vec!["GET".into()],
-            allowed_path_prefixes: vec!["/v1/".into()],
             test_path: String::new(),
-            cli: None,
-            browser: None,
-            credential: None,
             secret: None,
             encrypted_secrets: SecretEnvelope {
                 version: 1,

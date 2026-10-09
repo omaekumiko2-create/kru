@@ -98,6 +98,8 @@ Every module has its own Agent visibility switch:
 
 The eye and copy controls in the editor are for the local owner. The optional six-digit PIN locks plaintext viewing in the GUI; it does not replace vault encryption and does not disable MCP actions.
 
+Reorder modules using the drag handle on the left, or focus a handle and press the Up/Down arrow keys. Text fields support normal typing, selection, and copying. Deleting an item, module, or draft requires confirmation; module removal takes effect when you save the item.
+
 ## Built for local use
 
 <table>
@@ -142,6 +144,8 @@ Replacing or upgrading the executable does not remove your vault. KRU intentiona
 | Linux | `${XDG_DATA_HOME:-~/.local/share}/mcp-vault/v2` |
 
 Exported `.mvault` packages are encrypted and portable, but they contain their own unlock material for easy import. Protect a backup file as carefully as the original credentials.
+
+New exports use the leaner v4 backup format. Existing v3 backups can still be imported; v4 backups require a KRU version that supports that format. Existing v7 vaults remain readable and are saved as v8 on their first modification, preserving existing credentials. After this format upgrade, start new Agent sessions so they use the updated KRU; older versions cannot read v8 vaults.
 
 ## Common questions
 

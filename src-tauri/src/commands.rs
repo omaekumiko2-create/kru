@@ -273,7 +273,7 @@ async fn test_connection(
     let connection = runtime.vault.get_connection(id).map_err(command_error)?;
     let connection_name = connection.stored.name.clone();
     let result: anyhow::Result<String> =
-        if connection.stored.has_capability("ssh") || connection.stored.has_capability("http") {
+        if connection.stored.test_target(&connection.secrets).is_some() {
             executor::test_connection(&runtime.vault, &connection).await
         } else {
             Ok(format!(

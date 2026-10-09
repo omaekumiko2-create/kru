@@ -125,6 +125,7 @@
             <section class="module-editor">
               <div class="editor-heading module-editor-heading"><div><strong>项目模块</strong><small>左侧开关控制明文是否对 Agent 可见</small></div><div class="module-add-wrap"><button type="button" class="small-button" id="add-module-button" aria-expanded="false">＋ ADD MODULE</button><div class="module-menu hidden" id="module-menu"><button type="button" data-add-module="username">账号</button><button type="button" data-add-module="password">密码</button><button type="button" data-add-module="host">主机 / IP</button><button type="button" data-add-module="port">端口</button><button type="button" data-add-module="url">服务 URL</button><button type="button" data-add-module="apiCredential">API 凭据</button><button type="button" data-add-module="privateKey">私钥</button><button type="button" data-add-module="passphrase">私钥口令</button><button type="button" data-add-module="totp">TOTP</button><button type="button" data-add-module="customSecret">自定义字段</button></div></div></div>
               <div class="module-list" id="module-list"></div>
+              <div class="module-reorder-status" id="module-reorder-status" role="status" aria-live="polite"></div>
             </section>
 
 
@@ -132,6 +133,16 @@
           </div>
           <div class="modal-footer"><div class="secret-hint">当前项目的明文只在已解锁 GUI 中显示</div><div class="button-row"><button type="button" class="button quiet" data-close-modal>关闭</button><button type="submit" class="button primary" id="save-connection-button">保存</button></div></div>
         </form>
+      </div>
+    </div>
+
+    <div class="modal-backdrop hidden" id="confirmation-modal" role="alertdialog" aria-modal="true" aria-labelledby="confirmation-title" aria-describedby="confirmation-message">
+      <div class="confirm-card">
+        <div class="confirm-icon" aria-hidden="true"><svg viewBox="0 0 20 20"><path d="M3 5.5h14M7.5 5.5V3.25h5v2.25M5.25 5.5l.75 11h8l.75-11M8.25 8.5v5M11.75 8.5v5" /></svg></div>
+        <small id="confirmation-tag">CONFIRM DELETION</small>
+        <h2 id="confirmation-title">Delete item?</h2>
+        <p id="confirmation-message">This action cannot be undone.</p>
+        <div class="button-row confirm-actions"><button class="button quiet" id="confirmation-cancel" type="button">CANCEL</button><button class="button danger" id="confirmation-accept" type="button">DELETE</button></div>
       </div>
     </div>
 

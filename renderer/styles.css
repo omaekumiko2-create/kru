@@ -1410,9 +1410,8 @@ html.platform-macos .nav-item small { line-height: 7px; }
 .module-empty { display: flex; min-height: 42px; align-items: center; justify-content: space-between; gap: 12px; padding: 0 10px; color: var(--muted); background: transparent; }
 .module-empty b { color: var(--orange-dark); font-family: var(--mono); font-size: 8px; letter-spacing: .08em; }
 .module-empty span { font-size: 8px; }
-.module-row { position: relative; display: grid; min-width: 0; grid-template-columns: 34px 92px minmax(0, 1fr) auto; align-items: center; gap: 7px; padding: 6px 7px; background: transparent; cursor: grab; transition: opacity 100ms linear, background 100ms linear; }
+.module-row { position: relative; display: grid; min-width: 0; grid-template-columns: 20px 32px 84px minmax(0, 1fr) auto; align-items: center; gap: 6px; padding: 6px 7px; background: transparent; transition: opacity 100ms linear, background 100ms linear; }
 .module-row + .module-row { border-top: var(--rule-width) solid var(--line-soft); }
-.module-row:active { cursor: grabbing; }
 .module-row.is-dragging { opacity: .18; background: var(--chassis); }
 .module-list.is-sorting .module-row::before, .module-list.is-sorting .module-row:last-child::after { position: absolute; z-index: 3; right: 7px; left: 7px; height: 1px; background: var(--line-soft); content: ""; pointer-events: none; }
 .module-list.is-sorting .module-row::before { top: -1px; }
@@ -1425,6 +1424,12 @@ html.platform-macos .nav-item small { line-height: 7px; }
 .module-drag-preview span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .module-pointer-dragging, .module-pointer-dragging * { user-select: none !important; }
 .module-row button { cursor: pointer; }
+.module-row .module-drag-handle { display: grid; width: 20px; min-width: 20px; height: 32px; min-height: 32px; place-items: center; padding: 0; color: var(--muted); background: transparent; border: 0; box-shadow: none; cursor: grab; touch-action: none; user-select: none; }
+.module-row .module-drag-handle:active { cursor: grabbing; }
+.module-drag-handle:hover { color: var(--orange-dark); }
+.module-drag-handle:focus-visible { outline: 2px solid var(--orange); outline-offset: 1px; }
+.module-drag-handle svg { width: 12px; height: 20px; fill: none; stroke: currentColor; stroke-width: 2.5; stroke-linecap: round; }
+.module-reorder-status { position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); white-space: nowrap; }
 .module-row input, .module-row textarea { cursor: text; }
 .module-agent-toggle { position: relative; width: 32px; min-width: 32px; height: 16px; min-height: 16px; padding: 0; background: var(--line-soft); border: 0; box-shadow: none; }
 .module-agent-toggle:hover { background: var(--muted); box-shadow: none; }
@@ -1474,11 +1479,15 @@ html.platform-macos .nav-item small { line-height: 7px; }
 .secret-hint { display: flex; max-width: 250px; align-items: center; gap: 6px; color: var(--muted); font-size: 9px; }
 .secret-hint svg { flex: 0 0 auto; width: 13px; height: 13px; color: var(--orange-dark); }
 
-.confirm-card { width: min(360px, 100%); padding: 18px; background: var(--panel); border: 0; box-shadow: 0 10px 28px rgb(0 0 0 / 32%); }
+#confirmation-modal { z-index: 200; }
+.confirm-card { width: min(360px, 100%); padding: 18px; background: var(--panel); border: var(--rule-width) solid #343635; box-shadow: 0 10px 28px rgb(0 0 0 / 32%); }
 .confirm-icon { display: grid; width: 42px; height: 42px; place-items: center; color: #fff; background: var(--orange-dark); border: 0; box-shadow: var(--shadow-key); }
 .confirm-icon svg { width: 21px; height: 21px; }
+.confirm-card > small { display: block; margin-top: 13px; color: var(--orange-dark); font-family: var(--mono); font-size: 7px; font-weight: 600; letter-spacing: .12em; }
 .confirm-card h2 { margin: 13px 0 0; font-size: 18px; font-weight: 500; }
 .confirm-card p { margin: 7px 0 16px; color: var(--muted); font-size: 10px; line-height: 1.55; }
+.confirm-actions { justify-content: flex-end; }
+.confirm-actions .button { min-width: 86px; }
 /* Functional copy stays readable in the compact 460px window. Display ghosts remain intentionally dim and small. */
 .app-mark small,
 .nav-item small,
